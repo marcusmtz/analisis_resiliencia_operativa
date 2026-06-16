@@ -1,0 +1,10 @@
+# Ignorar el entorno virtual
+.venv/
+venv/
+
+# Ignorar archivos de caché de Python
+__pycache__/
+*.pyc
+
+# Opcional: Ignorar el archivo de Excel si es pesado/privado
+10.3 RECLAMOS POR AVERÍAS.xlsx
