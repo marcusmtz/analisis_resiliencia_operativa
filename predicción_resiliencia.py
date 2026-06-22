@@ -66,8 +66,11 @@ conjunto de datos de reclamos por avería:
             en train + val.
         *   **LightGBM**: `n_estimators`, `learning_rate`, `num_leaves`, `max_depth`,
             `feature_fraction`, `bagging_fraction`, `bagging_freq`, `lambda_l1`,
-            `lambda_l2`, `min_child_samples`. Categóricas nativas. Reentrenado en
-            train + val (sin early stopping en la fase final).
+            `lambda_l2`, `min_child_samples`. Categóricas nativas. Usa
+            `objective='poisson'` porque `Num_Reclamos_Aggregated` es una variable
+            de conteo (entero no negativo); esto evita el sesgo hacia la media
+            propio de la regresión MSE y garantiza predicciones no negativas.
+            Reentrenado en train + val (sin early stopping en la fase final).
         *   **Random Forest**: `n_estimators`, `max_depth`, `min_samples_split`,
             `min_samples_leaf`, `max_features`. Requiere OHE. Reentrenado en
             train + val.
@@ -94,23 +97,28 @@ conjunto de datos de reclamos por avería:
     *   **Validación cruzada temporal (TimeSeriesSplit, 5 folds)**: Evalúa estabilidad
         sobre train + val combinados, usando los mejores hiperparámetros Optuna.
         Reporta distribuciones de RMSE, MAE, R² y MSE por fold.
-    *   **Evaluación sobre escala RO (0–1)**: Realizada exclusivamente sobre LightGBM
-        (modelo ganador). Incluye MAE y RMSE sobre la escala (0, 1], accuracy de
-        categorización en Baja/Media/Alta con umbrales del train set (sin leakage),
-        y matriz de confusión individual.
+    *   **Modelo final — LightGBM Clasificador**: Dado que `RO = 1/(1+N_reclamos)` toma
+        valores discretos (N es entero), la regresión continua introduce un sesgo hacia
+        la media que impide predecir los extremos (RO=1.0 o RO≈0). Se redefine el
+        problema como clasificación multiclase directa: el target es la categoría
+        Baja/Media/Alta derivada con umbrales p33/p66 del train set. Se usa
+        `LGBMClassifier(objective='multiclass')` optimizado con Optuna (50 trials,
+        minimiza error de clasificación en validación). Métricas: accuracy, F1 macro,
+        F1 weighted, reporte de clasificación y matriz de confusión.
 
-5.  **Pronóstico 3 Meses — LightGBM**:
-    *   **Forecasting recursivo**: Para cada mes futuro (T+1, T+2, T+3) se construyen
-        las features de lag y rolling a partir del historial disponible. La predicción
-        de cada mes alimenta como `lag_1` al mes siguiente, propagando la información
-        hacia adelante sin usar datos reales futuros.
-    *   **Granularidad**: Se genera una fila por cada combinación única de
-        `Empresa × Departamento × Servicio × Materia × Tipo`. La RO reportada es el
-        promedio mensual sobre todos los grupos.
-    *   **Categorización del pronóstico**: Cada mes pronosticado se clasifica como
-        Baja/Media/Alta usando los mismos umbrales p33/p66 del train set.
-    *   **Visualización**: Gráfico de línea con la RO real del test set y los 3 meses
-        pronosticados, separados por una línea vertical que marca el fin del dataset.
+5.  **Pronóstico 3 Meses — LightGBM Clasificador**:
+    *   **Empresa seleccionada**: La empresa con más registros en el dataset.
+        El pronóstico parte desde el último mes con datos de esa empresa
+        (no del dataset global), evitando extrapolar desde un punto incorrecto.
+    *   **Features futuras**: Para cada mes futuro (T+1, T+2, T+3) se construyen
+        lag y rolling features desde el historial real. Las predicciones del regresor
+        base (LightGBM regresión) alimentan el `lag_1` del mes siguiente para
+        mantener la coherencia del historial.
+    *   **Predicción directa de categoría**: El clasificador predice Baja/Media/Alta
+        para cada grupo `Empresa × Departamento × Servicio × Materia × Tipo`.
+    *   **Visualización**: Gráfico de barras apiladas con la distribución porcentual
+        de categorías — panel izquierdo muestra el test set real, panel derecho los
+        3 meses pronosticados con porcentaje y categoría predominante.
 
 ## 1. Exploratory Data Analysis (EDA)
 
@@ -133,7 +141,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import (mean_absolute_error, mean_squared_error, r2_score,
-                             accuracy_score, confusion_matrix, ConfusionMatrixDisplay)
+                             accuracy_score, confusion_matrix, ConfusionMatrixDisplay,
+                             f1_score, classification_report)
 from catboost import CatBoostRegressor
 import xgboost as xgb
 from xgboost.callback import EarlyStopping
@@ -974,9 +983,9 @@ for col in cat_features_for_lgbm:
     X_val[col] = X_val[col].astype('category')
     X_test[col] = X_test[col].astype('category')
 
-# Inicializar el Regresor LightGBM
+# Inicializar LightGBM con objetivo Poisson (apropiado para datos de conteo)
 lgbm_model = lgb.LGBMRegressor(
-    objective='regression_l1',
+    objective='poisson',
     metric='rmse',
     n_estimators=1000,
     learning_rate=0.05,
@@ -1286,7 +1295,7 @@ cat_features_for_lgbm = X_train.select_dtypes(include='category').columns.tolist
 def objective_lgbm(trial):
     # Hiperparámetros a ajustar para LightGBM
     params = {
-        'objective': 'regression_l1',
+        'objective': 'poisson',
         'metric': 'rmse',
         'n_estimators': trial.suggest_int('n_estimators', 100, 2000),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
@@ -1325,7 +1334,7 @@ print(study_lgbm.best_params)
 # Volver a entrenar LightGBM con los mejores hiperparámetros en X_train + X_val para el modelo final
 print("Reentrenando LightGBM con hiperparámetros optimizados en el conjunto de entrenamiento completo...")
 best_lgbm_params = study_lgbm.best_params.copy()
-best_lgbm_params['objective'] = 'regression_l1'
+best_lgbm_params['objective'] = 'poisson'
 best_lgbm_params['metric'] = 'rmse'
 best_lgbm_params['random_state'] = 42
 best_lgbm_params['n_jobs'] = -1
@@ -1766,7 +1775,7 @@ for fold, (train_index, test_index) in enumerate(tscv.split(X_train_val_combined
     y_cv_train, y_cv_test = y_train_val_combined.iloc[train_index], y_train_val_combined.iloc[test_index]
 
     best_lgbm_params_cv = study_lgbm.best_params.copy()
-    best_lgbm_params_cv['objective'] = 'regression_l1'
+    best_lgbm_params_cv['objective'] = 'poisson'
     best_lgbm_params_cv['metric'] = 'rmse'
     best_lgbm_params_cv['random_state'] = 42
     best_lgbm_params_cv['n_jobs'] = -1
@@ -1867,76 +1876,112 @@ plt.show()
 print("CV analysis complete.")
 
 
-"""### 4.7 Evaluación de Resiliencia Operativa Predicha — Modelo Ganador (LightGBM)"""
+"""### MODELO FINAL — LightGBM Clasificador de Resiliencia Operativa"""
 
 print("\n" + "="*60)
-print("  4.7 EVALUACIÓN DE RESILIENCIA OPERATIVA PREDICHA")
-print("  Modelo ganador: LightGBM (mejor MAE, RMSE, R² y MSE)")
+print("  MODELO FINAL: LightGBM CLASIFICADOR")
+print("  Target: Baja / Media / Alta (umbrales del train set)")
+print("  Elimina el sesgo de la media propio de la regresión MSE.")
 print("="*60)
 
-# RO real del conjunto de prueba
-y_test_ro = 1 / (1 + y_test.values)
+# --- Target de clasificación (anti-leakage: umbrales solo del train set) ---
+_ro_train = 1 / (1 + y_train.values)
+_p33_cls  = np.percentile(_ro_train, 33)
+_p66_cls  = np.percentile(_ro_train, 66)
 
-# RO predicha por LightGBM (clipping para evitar negativos)
-y_pred_lgbm_ro = 1 / (1 + np.maximum(0, y_pred_lgbm))
+print(f"\n  Umbrales del train set:")
+print(f"    p33 = {_p33_cls:.4f}  →  RO ≤ p33 : Baja")
+print(f"    p66 = {_p66_cls:.4f}  →  p33 < RO ≤ p66 : Media  |  RO > p66 : Alta")
 
-# --- Métricas MAE y RMSE sobre escala RO (0–1) ---
-mae_ro_lgbm  = mean_absolute_error(y_test_ro, y_pred_lgbm_ro)
-rmse_ro_lgbm = np.sqrt(mean_squared_error(y_test_ro, y_pred_lgbm_ro))
+def _cls_target(y_series):
+    ro = 1 / (1 + y_series.values)
+    return pd.Series(
+        np.where(ro <= _p33_cls, 'Baja', np.where(ro <= _p66_cls, 'Media', 'Alta')),
+        index=y_series.index
+    )
 
-print("\n--- Métricas de error sobre Resiliencia Operativa (escala 0–1) ---")
-print(f"  MAE  (RO): {mae_ro_lgbm:.6f}")
-print(f"  RMSE (RO): {rmse_ro_lgbm:.6f}")
+y_train_cls = _cls_target(y_train)
+y_val_cls   = _cls_target(y_val)
+y_test_cls  = _cls_target(y_test)
 
-# --- Scatter plot: RO real vs RO predicha ---
-fig, ax = plt.subplots(figsize=(7, 6))
-ax.scatter(y_test_ro, y_pred_lgbm_ro, alpha=0.35, color='steelblue',
-           edgecolors='none', s=18, label='Observaciones test')
-lims = [min(y_test_ro.min(), y_pred_lgbm_ro.min()),
-        max(y_test_ro.max(), y_pred_lgbm_ro.max())]
-ax.plot(lims, lims, 'r--', linewidth=1.5, label='Predicción perfecta')
-ax.set_xlabel('RO Real', fontsize=11)
-ax.set_ylabel('RO Predicha — LightGBM', fontsize=11)
-ax.set_title('Resiliencia Operativa: Real vs Predicha\nLightGBM (modelo ganador)',
-             fontsize=13, weight='bold')
-ax.annotate(f'MAE  = {mae_ro_lgbm:.5f}\nRMSE = {rmse_ro_lgbm:.5f}',
-            xy=(0.05, 0.90), xycoords='axes fraction', fontsize=10, color='darkred',
-            bbox=dict(boxstyle='round,pad=0.4', facecolor='lightyellow', edgecolor='gray'))
-ax.legend()
-ax.grid(linestyle='--', alpha=0.4)
-plt.tight_layout()
-plt.show()
+print(f"\n  Distribución en train set:")
+print(y_train_cls.value_counts().to_string())
 
-# --- Categorización y Accuracy ---
-# Umbrales calculados sobre el conjunto de entrenamiento (sin data leakage)
-y_train_ro = 1 / (1 + y_train.values)
-p33_train = np.percentile(y_train_ro, 33)
-p66_train = np.percentile(y_train_ro, 66)
+# --- Optuna para LightGBM Clasificador ---
+cat_features_lgbm_clf = X_train.select_dtypes(include='category').columns.tolist()
 
-print(f"\n  Umbrales de categorización (train set):")
-print(f"    p33 = {p33_train:.4f}  →  RO ≤ p33: Baja")
-print(f"    p66 = {p66_train:.4f}  →  RO ≤ p66: Media  |  RO > p66: Alta")
+def objective_lgbm_clf(trial):
+    params = {
+        'objective': 'multiclass',
+        'num_class': 3,
+        'metric': 'multi_logloss',
+        'n_estimators': trial.suggest_int('n_estimators', 100, 2000),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'num_leaves': trial.suggest_int('num_leaves', 2, 256),
+        'max_depth': trial.suggest_int('max_depth', 3, 15),
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.4, 1.0),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.4, 1.0),
+        'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 10.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 10.0, log=True),
+        'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+        'random_state': 42,
+        'n_jobs': -1,
+        'verbose': -1,
+    }
+    model = lgb.LGBMClassifier(**params)
+    model.fit(X_train, y_train_cls,
+              eval_set=[(X_val, y_val_cls)],
+              callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+              categorical_feature=cat_features_lgbm_clf)
+    y_pred_val_cls = model.predict(X_val)
+    return 1 - accuracy_score(y_val_cls, y_pred_val_cls)
 
-def categorize_ro(ro_array, p33, p66):
-    return np.where(ro_array <= p33, 'Baja',
-           np.where(ro_array <= p66, 'Media', 'Alta'))
+print("\nOptimizando LightGBM Clasificador con Optuna (50 trials)...")
+study_lgbm_clf = optuna.create_study(direction='minimize', study_name='LightGBM_Classifier')
+study_lgbm_clf.optimize(objective_lgbm_clf, n_trials=50, show_progress_bar=True)
+print(f"Mejor accuracy en validación: {(1 - study_lgbm_clf.best_trial.value)*100:.2f}%")
 
-y_test_cat  = categorize_ro(y_test_ro,       p33_train, p66_train)
-y_lgbm_cat  = categorize_ro(y_pred_lgbm_ro,  p33_train, p66_train)
+# --- Entrenamiento final en train + val ---
+best_clf_params = study_lgbm_clf.best_params.copy()
+best_clf_params.update({
+    'objective': 'multiclass', 'num_class': 3,
+    'metric': 'multi_logloss', 'random_state': 42,
+    'n_jobs': -1, 'verbose': -1,
+})
 
-acc_lgbm = accuracy_score(y_test_cat, y_lgbm_cat)
-print(f"\n--- Accuracy de Categoría (Baja / Media / Alta) ---")
-print(f"  LightGBM: {acc_lgbm:.4f} ({acc_lgbm*100:.2f}%)")
+X_train_val_clf = pd.concat([X_train, X_val])
+y_train_val_clf = pd.concat([y_train_cls, y_val_cls])
 
-# --- Matriz de confusión ---
-labels = ['Alta', 'Baja', 'Media']
+lgbm_clf_model = lgb.LGBMClassifier(**best_clf_params)
+lgbm_clf_model.fit(X_train_val_clf, y_train_val_clf,
+                   categorical_feature=cat_features_lgbm_clf)
+
+# --- Evaluación en test set ---
+y_pred_cls = lgbm_clf_model.predict(X_test)
+
+acc_clf      = accuracy_score(y_test_cls, y_pred_cls)
+f1_macro     = f1_score(y_test_cls, y_pred_cls, average='macro')
+f1_weighted  = f1_score(y_test_cls, y_pred_cls, average='weighted')
+
+print("\n" + "="*60)
+print("  RESULTADOS — LightGBM CLASIFICADOR (test set)")
+print("="*60)
+print(f"  Accuracy    : {acc_clf:.4f} ({acc_clf*100:.2f}%)")
+print(f"  F1 Macro    : {f1_macro:.4f}")
+print(f"  F1 Weighted : {f1_weighted:.4f}")
+print("\n  Reporte de clasificación:")
+print(classification_report(y_test_cls, y_pred_cls, target_names=['Alta', 'Baja', 'Media']))
+
+# Matriz de confusión
+labels_cls = ['Alta', 'Baja', 'Media']
 fig, ax = plt.subplots(figsize=(6, 5))
-fig.suptitle('Matriz de Confusión — LightGBM\nCategoría de Resiliencia Operativa',
-             fontsize=13, weight='bold')
-cm = confusion_matrix(y_test_cat, y_lgbm_cat, labels=labels)
-disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+cm_cls = confusion_matrix(y_test_cls, y_pred_cls, labels=labels_cls)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm_cls, display_labels=labels_cls)
 disp.plot(ax=ax, colorbar=False, cmap='Blues')
-ax.set_title(f'Accuracy: {acc_lgbm*100:.2f}%')
+ax.set_title(f'LightGBM Clasificador — Resiliencia Operativa\n'
+             f'Accuracy: {acc_clf*100:.2f}%  |  F1 Macro: {f1_macro:.4f}',
+             fontsize=11)
 plt.tight_layout()
 plt.show()
 
@@ -1953,27 +1998,41 @@ df_hist_fc = df_sorted_fe.copy()
 df_hist_fc['_fecha'] = pd.to_datetime(
     df_hist_fc['Year'].astype(str) + '-' + df_hist_fc['Month'].astype(str) + '-01'
 )
-last_date = df_hist_fc['_fecha'].max()
-
 # Empresa con más registros en el dataset
 empresa_fc = df_hist_fc['Empresa_operadora_grouped'].value_counts().index[0]
-print(f"  Último mes del dataset: {last_date.strftime('%Y-%m')}")
+
+# Último mes con datos de ESA empresa (puede ser anterior al fin del dataset global)
+last_date = df_hist_fc[
+    df_hist_fc['Empresa_operadora_grouped'] == empresa_fc
+]['_fecha'].max()
+
 print(f"  Empresa seleccionada para el pronóstico: {empresa_fc}")
+print(f"  Último mes con datos de {empresa_fc}: {last_date.strftime('%Y-%m')}")
+print(f"  Pronóstico: {(last_date + pd.DateOffset(months=1)).strftime('%Y-%m')} → "
+      f"{(last_date + pd.DateOffset(months=3)).strftime('%Y-%m')}")
 
 feature_cols = X_train.columns.tolist()
 
-# RO mensual promedio real del test set — solo empresa seleccionada
-df_test_ro_plot = df_sorted_fe.iloc[val_split_point:].copy()
-df_test_ro_plot = df_test_ro_plot[
-    df_test_ro_plot['Empresa_operadora_grouped'] == empresa_fc
+# Categoría real mensual del test set — solo empresa seleccionada
+df_test_cls_plot = df_sorted_fe.iloc[val_split_point:].copy()
+df_test_cls_plot = df_test_cls_plot[
+    df_test_cls_plot['Empresa_operadora_grouped'] == empresa_fc
 ].copy()
-df_test_ro_plot['RO'] = 1 / (1 + df_test_ro_plot['Num_Reclamos_por_averia_Aggregated'])
-df_test_ro_plot['_fecha'] = pd.to_datetime(
-    df_test_ro_plot['Year'].astype(str) + '-' + df_test_ro_plot['Month'].astype(str) + '-01'
+df_test_cls_plot['_fecha'] = pd.to_datetime(
+    df_test_cls_plot['Year'].astype(str) + '-' + df_test_cls_plot['Month'].astype(str) + '-01'
 )
-ro_mensual_real = df_test_ro_plot.groupby('_fecha')['RO'].mean().reset_index()
+_ro_test_emp = 1 / (1 + df_test_cls_plot['Num_Reclamos_por_averia_Aggregated'].values)
+df_test_cls_plot['categoria'] = np.where(_ro_test_emp <= _p33_cls, 'Baja',
+                                np.where(_ro_test_emp <= _p66_cls, 'Media', 'Alta'))
 
-# Forecasting recursivo: T+1 → T+2 → T+3 — solo grupos de la empresa seleccionada
+# Distribución porcentual de categorías por mes (test set)
+cls_real_mensual = (df_test_cls_plot
+    .groupby(['_fecha', 'categoria'])
+    .size()
+    .unstack(fill_value=0))
+cls_real_mensual = cls_real_mensual.div(cls_real_mensual.sum(axis=1), axis=0) * 100
+
+# Forecasting con clasificador directo: T+1 → T+2 → T+3
 forecast_records = []
 
 for i in range(1, 4):
@@ -2022,51 +2081,82 @@ for i in range(1, 4):
 
     df_future = pd.DataFrame(rows)
 
-    # Restaurar dtypes categóricos con las mismas categorías que vio LightGBM en entrenamiento
     for col in categorical_cols_native:
         if col in df_future.columns and col in X_train.columns:
             df_future[col] = pd.Categorical(df_future[col],
                                             categories=X_train[col].cat.categories)
 
-    y_future_pred = np.maximum(0, lgbm_model.predict(df_future[feature_cols]))
-    ro_pred   = 1 / (1 + y_future_pred)
-    ro_mean   = ro_pred.mean()
-    categoria = categorize_ro(np.array([ro_mean]), p33_train, p66_train)[0]
-    print(f"  {future_date.strftime('%Y-%m')}: RO promedio = {ro_mean:.4f}  → {categoria}")
+    # Clasificador predice categoría directamente
+    cats_pred = lgbm_clf_model.predict(df_future[feature_cols])
+    dist = pd.Series(cats_pred).value_counts(normalize=True) * 100
+    mayoria = pd.Series(cats_pred).mode()[0]
+    print(f"  {future_date.strftime('%Y-%m')}: "
+          f"Alta={dist.get('Alta',0):.1f}%  Media={dist.get('Media',0):.1f}%  "
+          f"Baja={dist.get('Baja',0):.1f}%  → Predominante: {mayoria}")
 
     forecast_records.append({
         '_fecha': future_date.replace(day=1),
-        'RO': ro_mean,
-        'categoria': categoria
+        'Alta':  dist.get('Alta', 0),
+        'Media': dist.get('Media', 0),
+        'Baja':  dist.get('Baja', 0),
+        'mayoria': mayoria
     })
 
-    # Agregar predicciones al historial para el siguiente mes (paso recursivo)
-    df_future['Num_Reclamos_por_averia_Aggregated'] = y_future_pred
+    # Actualizar historial con predicciones de reclamos del regresor base (para lag features)
+    y_future_reg = np.maximum(0, lgbm_model.predict(df_future[feature_cols]))
+    df_future['Num_Reclamos_por_averia_Aggregated'] = y_future_reg
     df_future['_fecha'] = future_date.replace(day=1)
     cols_comunes = [c for c in df_hist_fc.columns if c in df_future.columns]
     df_hist_fc = pd.concat([df_hist_fc, df_future[cols_comunes]], ignore_index=True)
 
-df_forecast = pd.DataFrame(forecast_records)
+df_forecast = pd.DataFrame(forecast_records).set_index('_fecha')
 
-# --- Gráfico: RO real (test) + pronóstico 3 meses ---
-plt.figure(figsize=(13, 5))
-plt.plot(ro_mensual_real['_fecha'], ro_mensual_real['RO'],
-         marker='o', color='steelblue', linewidth=2, label='RO Real (test set)')
-plt.plot(df_forecast['_fecha'], df_forecast['RO'],
-         marker='s', linestyle='--', color='tomato', linewidth=2, label='Pronóstico LightGBM')
-plt.axvline(x=last_date, color='gray', linestyle=':', linewidth=1.5, label='Fin del dataset')
+# --- Gráfico: distribución real (test) + pronóstico categórico 3 meses ---
+colores = {'Alta': '#2ecc71', 'Media': '#f39c12', 'Baja': '#e74c3c'}
+cats_order = ['Alta', 'Media', 'Baja']
 
-for _, r in df_forecast.iterrows():
-    plt.annotate(f"{r['RO']:.3f}\n({r['categoria']})",
-                 (r['_fecha'], r['RO']),
-                 textcoords='offset points', xytext=(0, 14),
-                 ha='center', fontsize=9, color='tomato', weight='bold')
+fig, axes = plt.subplots(1, 2, figsize=(15, 5),
+                         gridspec_kw={'width_ratios': [3, 1]})
+fig.suptitle(f'Resiliencia Operativa — {empresa_fc}\nLightGBM Clasificador',
+             fontsize=13, weight='bold')
 
-plt.title(f'Resiliencia Operativa — Real vs Pronóstico 3 Meses\n{empresa_fc} · LightGBM (modelo ganador)',
-          fontsize=13, weight='bold')
-plt.xlabel('Mes')
-plt.ylabel('RO Promedio (escala 0–1)')
-plt.legend()
-plt.grid(axis='y', linestyle='--', alpha=0.5)
+# Panel izquierdo: distribución real en test set
+for cat in cats_order:
+    if cat in cls_real_mensual.columns:
+        axes[0].fill_between(cls_real_mensual.index, 0,
+                             cls_real_mensual[cat].cumsum(axis=0) if cat == cats_order[0]
+                             else cls_real_mensual[cats_order[:cats_order.index(cat)]].sum(axis=1) +
+                                  cls_real_mensual[cat],
+                             alpha=0.0)
+
+bottom_real = np.zeros(len(cls_real_mensual))
+for cat in cats_order:
+    if cat in cls_real_mensual.columns:
+        axes[0].bar(cls_real_mensual.index, cls_real_mensual[cat],
+                    bottom=bottom_real, color=colores[cat], label=cat, width=20)
+        bottom_real += cls_real_mensual[cat].values
+axes[0].set_title('Distribución real (test set)', fontsize=11)
+axes[0].set_ylabel('% de grupos')
+axes[0].set_ylim(0, 100)
+axes[0].legend(loc='upper left')
+axes[0].grid(axis='y', linestyle='--', alpha=0.4)
+
+# Panel derecho: pronóstico 3 meses
+bottom_fc = np.zeros(len(df_forecast))
+for cat in cats_order:
+    axes[1].bar(range(len(df_forecast)), df_forecast[cat],
+                bottom=bottom_fc, color=colores[cat], label=cat)
+    for j, val in enumerate(df_forecast[cat]):
+        if val > 5:
+            axes[1].text(j, bottom_fc[j] + val / 2, f'{val:.0f}%',
+                         ha='center', va='center', fontsize=8, weight='bold', color='white')
+    bottom_fc += df_forecast[cat].values
+axes[1].set_xticks(range(len(df_forecast)))
+axes[1].set_xticklabels([d.strftime('%Y-%m') for d in df_forecast.index], rotation=15)
+axes[1].set_title('Pronóstico 3 meses', fontsize=11)
+axes[1].set_ylabel('% de grupos')
+axes[1].set_ylim(0, 100)
+axes[1].grid(axis='y', linestyle='--', alpha=0.4)
+
 plt.tight_layout()
 plt.show()
