@@ -3,101 +3,122 @@
 ## Metodología para la Predicción de la Resiliencia Operativa
 ## Empresas de Telecomunicaciones Peruanas
 
-Para predecir la resiliencia operativa utilizando el conjunto de datos de reclamos por avería,
-se han seguido los siguientes pasos:
+Pipeline completo en cuatro fases para predecir la resiliencia operativa a partir del
+conjunto de datos de reclamos por avería:
 
 1.  **Análisis Exploratorio de Datos (EDA)**:
-    *   **Carga de Datos**: Se cargó el archivo Excel en un DataFrame de pandas, omitiendo
-        las primeras 3 filas de encabezado y renombrando 'N° Reclamos por avería' a
+    *   **Carga de Datos**: Archivo Excel cargado en pandas omitiendo las primeras 3 filas
+        de encabezado; columna renombrada de 'N° Reclamos por avería' a
         'Num_Reclamos_por_averia'.
-    *   **Inspección Inicial**: Se verificó la estructura, tipos de datos y estadísticas
-        descriptivas del conjunto de datos.
-    *   **Valores Faltantes**: Se identificaron y eliminaron las filas con valores nulos en
-        'Num_Reclamos_por_averia'. Las demás columnas no presentaron nulos.
-    *   **Valores Atípicos (Outliers)**: Se detectaron visualmente mediante boxplot usando el
-        método IQR. La asimetría (skewness) granular se reporta como referencia informativa;
-        el capping efectivo se realiza DESPUÉS de la agregación (ver punto 2).
-    *   **Análisis de Distribución**: Se examinó la distribución de 'Num_Reclamos_por_averia'
-        y la frecuencia de las principales variables categóricas.
-    *   **Tendencias Temporales**: Se visualizaron tendencias mensuales y anuales del total
-        de reclamos para identificar patrones y estacionalidad.
+    *   **Inspección inicial**: Estructura, tipos de datos y estadísticas descriptivas.
+    *   **Valores faltantes**: Filas con nulos en 'Num_Reclamos_por_averia' eliminadas.
+        Las demás columnas no presentaron nulos.
+    *   **Outliers (nivel granular)**: Detección visual mediante boxplot IQR. La asimetría
+        granular se reporta como referencia; el capping efectivo ocurre DESPUÉS de agregar
+        (ver punto 2) para no perder información al sumar.
+    *   **Distribución y frecuencias**: Histogramas de reclamos y countplots de variables
+        categóricas (empresa, departamento, servicio, materia, tipo).
+    *   **Tendencias temporales**: Series mensuales y anuales del total de reclamos para
+        identificar estacionalidad y cambios de nivel.
 
 2.  **Limpieza y Preprocesamiento de Datos**:
-    *   **Tratamiento de Duplicados**: Se identificaron y eliminaron filas duplicadas del
-        DataFrame original.
-    *   **Agregación de Datos**: Los registros granulares fueron agregados por `Mes`,
-        `Empresa operadora`, `Departamento`, `Servicio involucrado`, `Materia reclamable`
-        y `Tipo de reclamo`, sumando 'Num_Reclamos_por_averia' en la nueva columna
-        `Num_Reclamos_por_averia_Aggregated`. Este es el nivel donde opera el modelo.
-    *   **Capping (Winsorización) sobre Datos Agregados**: El tratamiento de outliers se
-        aplica sobre `Num_Reclamos_por_averia_Aggregated` mediante el método IQR
-        (límites Q1 − 1.5·IQR y Q3 + 1.5·IQR), dado que la suma de valores granulares
-        puede producir agregados extremos incluso si cada registro individual es moderado.
-    *   **Características Temporales**: Se extrajeron `Year`, `Month`, `Quarter` y
-        `Semester` a partir de la columna `Mes`.
-    *   **Ingeniería de Características Temporales (Lag y Rolling)**:
-        *   Se crearon `lag features` con desfases de 1, 3, 6 y 12 meses sobre
-            `Num_Reclamos_por_averia_Aggregated`, agrupando por
-            `Empresa_operadora_grouped`, `Departamento` y `Servicio involucrado`.
-        *   Se calcularon `rolling statistics` (media y desviación estándar móviles con
-            ventanas de 3, 6 y 12 meses) usando `shift(1)` antes de cada ventana para
-            evitar fuga de datos.
-        *   Los valores `NaN` resultantes se rellenaron con `-1` como centinela de
-            "sin historial disponible", diferenciándolo de 0 reclamos reales.
-    *   **Manejo de Alta Cardinalidad**: Las empresas operadoras con baja frecuencia
-        (fuera del top 20) se agruparon en la categoría 'Other'.
-    *   **Codificación de Variables Categóricas**:
-        *   CatBoost y LightGBM reciben las columnas categóricas (`Departamento`,
-            `Servicio involucrado`, `Materia reclamable`, `Tipo de reclamo`,
-            `Empresa_operadora_grouped`) como tipo `category` de pandas.
-        *   XGBoost y Random Forest reciben las mismas columnas codificadas mediante
-            `One-Hot Encoding`, con alineación de columnas entre train/val/test.
-    *   **Definición de `Resiliencia_Operativa`**: Variable objetivo continua calculada
-        como `RO = 1 / (1 + Num_Reclamos_por_averia_Aggregated)` ∈ (0, 1], donde
-        valores cercanos a 1 indican mayor resiliencia. Se deriva también una versión
-        categórica (`Baja`, `Media`, `Alta`) basada en percentiles 33 y 66 del conjunto
-        de entrenamiento, usada exclusivamente para evaluación descriptiva.
+    *   **Duplicados**: Filas duplicadas identificadas y eliminadas del DataFrame original.
+    *   **Agregación**: Registros granulares agrupados por `Mes`, `Empresa operadora`,
+        `Departamento`, `Servicio involucrado`, `Materia reclamable` y `Tipo de reclamo`,
+        sumando reclamos en `Num_Reclamos_por_averia_Aggregated`. Éste es el nivel
+        de granularidad donde operan todos los modelos.
+    *   **Capping anti-leakage (winsorización)**: Los límites IQR se estiman SOLO sobre
+        el 70% cronológicamente más antiguo (tramo de entrenamiento), y se aplican al
+        DataFrame completo. Esto evita que información de val/test contamine los umbrales.
+    *   **Características temporales**: `Year`, `Month`, `Quarter` y `Semester` extraídos
+        de `Mes`.
+    *   **Lag features (1, 3, 6, 12 meses)** y **rolling statistics (ventanas 3, 6, 12)**:
+        Calculados por grupo completo `Empresa × Departamento × Servicio × Materia × Tipo`
+        con `shift(1)` previo a cada ventana para evitar data leakage. NaN rellenados
+        con centinela `-1` ("sin historial"), diferenciado de 0 reclamos reales.
+    *   **Alta cardinalidad**: Empresas fuera del top 20 agrupadas en 'Other'.
+    *   **Codificación categórica**:
+        *   CatBoost y LightGBM usan tipo `category` de pandas (nativamente).
+        *   XGBoost y Random Forest usan One-Hot Encoding con alineación de columnas
+            train/val/test mediante la función `ohe_and_align()`.
+    *   **Variable objetivo `Resiliencia_Operativa`**: Continua, `RO = 1 / (1 + N_reclamos)`
+        ∈ (0, 1], donde 1 = máxima resiliencia. La categorización en Baja/Media/Alta
+        (percentiles 33/66) se calcula sobre el conjunto de entrenamiento para evitar
+        leakage; se usa solo para evaluación descriptiva, no como feature.
 
 3.  **División de Datos y Modelado**:
-    *   **División Cronológica**: Los datos ordenados temporalmente se dividen en
-        entrenamiento (70%), validación (15%) y prueba (15%), preservando la secuencia
-        temporal para evitar data leakage futuro→pasado.
-    *   **Prevención de Fuga de Datos**: Las columnas `Num_Reclamos_por_averia_Aggregated`,
-        `Resiliencia_Operativa` y `Resiliencia_Operativa_Category` se excluyen del
-        conjunto de características X.
-    *   **Entrenamiento y Optimización con Optuna (50 trials por modelo)**:
-        *   **CatBoost Regressor**: Optimiza `iterations`, `learning_rate`, `depth`,
-            `l2_leaf_reg` y `bagging_temperature`. Maneja categóricas de forma nativa.
-            El modelo final se reentrena sobre train + val con los mejores hiperparámetros.
-        *   **XGBoost Regressor**: Optimiza `eta`, `max_depth`, `subsample`,
-            `colsample_bytree`, `min_child_weight`, `gamma` y `n_estimators`.
-            Requiere OHE. El modelo final se reentrena sobre train + val.
-        *   **LightGBM Regressor**: Optimiza `n_estimators`, `learning_rate`,
-            `num_leaves`, `max_depth`, `feature_fraction`, `bagging_fraction`,
-            `lambda_l1`, `lambda_l2` y `min_child_samples`. Maneja categóricas de
-            forma nativa vía `categorical_feature` en el método `fit()`.
-            El modelo final se reentrena sobre train + val.
-        *   **Random Forest Regressor**: Optimiza `n_estimators`, `max_depth`,
-            `min_samples_split`, `min_samples_leaf` y `max_features`. Requiere OHE.
-            El modelo final se reentrena sobre train + val.
-    *   **Manejo de Predicciones Negativas**: Todas las predicciones se recortan con
-        `np.maximum(0, y_pred)` antes de calcular `Resiliencia_Operativa`.
+    *   **División cronológica**: 70% entrenamiento / 15% validación / 15% prueba,
+        ordenados temporalmente. El split se hace por posición después de ordenar por
+        Year+Month, preservando la causalidad temporal.
+    *   **Exclusión del target**: `Num_Reclamos_por_averia_Aggregated`,
+        `Resiliencia_Operativa` y `Resiliencia_Operativa_Category` excluidas de X.
+    *   **Entrenamiento base** (pre-Optuna) para los 4 modelos con hiperparámetros por
+        defecto razonables, usando early stopping sobre el conjunto de validación.
+        Métricas base guardadas como snapshots (`*_base`) antes de optimizar.
+    *   **Optimización con Optuna (50 trials por modelo)**:
+        *   **CatBoost**: `iterations`, `learning_rate`, `depth`, `l2_leaf_reg`,
+            `bagging_temperature`. El objetivo de Optuna usa validación cruzada temporal
+            interna (TimeSeriesSplit, 3 splits sobre train+val) para evitar que los
+            hiperparámetros sobreajusten a un único período de validación. Reentrenado
+            en train + val con los mejores parámetros encontrados.
+        *   **XGBoost**: `eta`, `max_depth`, `subsample`, `colsample_bytree`,
+            `min_child_weight`, `gamma`, `n_estimators`. Requiere OHE. Reentrenado
+            en train + val.
+        *   **LightGBM**: `n_estimators`, `learning_rate`, `num_leaves`, `max_depth`,
+            `feature_fraction`, `bagging_fraction`, `bagging_freq`, `lambda_l1`,
+            `lambda_l2`, `min_child_samples`. Categóricas nativas. Usa
+            `objective='poisson'` porque `Num_Reclamos_Aggregated` es una variable
+            de conteo (entero no negativo); esto evita el sesgo hacia la media
+            propio de la regresión MSE y garantiza predicciones no negativas.
+            Reentrenado en train + val (sin early stopping en la fase final).
+        *   **Random Forest**: `n_estimators`, `max_depth`, `min_samples_split`,
+            `min_samples_leaf`, `max_features`. Requiere OHE. Reentrenado en
+            train + val.
+    *   **Clipping de predicciones negativas**: `np.maximum(0, y_pred)` antes de derivar
+        `Resiliencia_Operativa`, ya que reclamos negativos carecen de significado físico.
 
 4.  **Evaluación y Comparación de Modelos**:
-    *   **Métricas sobre el conjunto de prueba**: `MAE`, `RMSE`, `R²` y `MAPE`.
-        El MAPE excluye observaciones con `y_true = 0` para evitar divisiones por cero.
-    *   **Análisis de Importancia de Características**: Se obtiene la importancia
-        intrínseca de cada modelo para los 4 algoritmos.
-    *   **Valores SHAP (Interpretabilidad)**: Se calculan SHAP beeswarm plots para los
-        4 modelos. Para Random Forest se submuestrea el test set a 500 observaciones
-        para mantener tiempos de cómputo razonables.
-    *   **Validación Cruzada Temporal (TimeSeriesSplit, 5 folds)**: Se evalúa la
-        estabilidad y robustez de los modelos mediante CV temporal sobre la unión de
-        train + val, reportando distribuciones de RMSE, MAE, R² y MAPE por fold.
-    *   **Evaluación de Resiliencia Operativa Predicha**: Se calculan MAE y RMSE
-        directamente sobre la escala RO (0–1), se categorizan las predicciones en
-        Baja/Media/Alta usando umbrales del conjunto de entrenamiento (sin data leakage)
-        y se reportan matrices de confusión y accuracy para los 4 modelos.
+    *   **Tablas de métricas con identificación clara**:
+        *   [TABLA 1 de 3] Modelos base sin Optuna — referencia de partida.
+        *   [TABLA INTERMEDIA] Estado parcial (CatBoost+XGBoost optimizados,
+            LightGBM+RF aún base) — solo informativa, no usar para comparar.
+        *   [TABLA 3 de 3] Comparación definitiva con los 4 modelos optimizados.
+        Las tablas 1 y 3 se exportan automáticamente a TXT (`metricas_modelos_base.txt`
+        y `metricas_modelos_optimizados.txt`) para consulta externa.
+    *   **Métricas sobre test set**: `MAE`, `RMSE`, `R²` y `MSE` (Error Cuadrático Medio).
+        Se prefiere MSE sobre MAPE porque el dataset contiene muchos grupos con 1–3 reclamos
+        mensuales, lo que infla artificialmente los errores porcentuales.
+    *   **Importancia de características**: Mostrada exactamente dos veces mediante la
+        función reutilizable `plot_feature_importance()`: tras los modelos base
+        (CatBoost + XGBoost) y tras completar las 4 optimizaciones Optuna (los 4 modelos).
+    *   **SHAP (interpretabilidad)**: Beeswarm plots titulados "Impacto y Dirección de
+        las Variables" para los 4 modelos. Para Random Forest se submuestrea a 500
+        observaciones por coste computacional.
+    *   **Validación cruzada temporal (TimeSeriesSplit, 5 folds)**: Evalúa estabilidad
+        sobre train + val combinados, usando los mejores hiperparámetros Optuna.
+        Reporta distribuciones de RMSE, MAE, R² y MSE por fold.
+    *   **Modelo final — LightGBM Clasificador**: Dado que `RO = 1/(1+N_reclamos)` toma
+        valores discretos (N es entero), la regresión continua introduce un sesgo hacia
+        la media que impide predecir los extremos (RO=1.0 o RO≈0). Se redefine el
+        problema como clasificación multiclase directa: el target es la categoría
+        Baja/Media/Alta derivada con umbrales p33/p66 del train set. Se usa
+        `LGBMClassifier(objective='multiclass')` optimizado con Optuna (50 trials,
+        minimiza error de clasificación en validación). Métricas: accuracy, F1 macro,
+        F1 weighted, reporte de clasificación y matriz de confusión.
+
+5.  **Pronóstico 3 Meses — LightGBM Clasificador**:
+    *   **Empresa seleccionada**: La empresa con más registros en el dataset.
+        El pronóstico parte desde el último mes con datos de esa empresa
+        (no del dataset global), evitando extrapolar desde un punto incorrecto.
+    *   **Features futuras**: Para cada mes futuro (T+1, T+2, T+3) se construyen
+        lag y rolling features desde el historial real. Las predicciones del regresor
+        base (LightGBM regresión) alimentan el `lag_1` del mes siguiente para
+        mantener la coherencia del historial.
+    *   **Predicción directa de categoría**: El clasificador predice Baja/Media/Alta
+        para cada grupo `Empresa × Departamento × Servicio × Materia × Tipo`.
+    *   **Visualización**: Gráfico de barras apiladas con la distribución porcentual
+        de categorías — panel izquierdo muestra el test set real, panel derecho los
+        3 meses pronosticados con porcentaje y categoría predominante.
 
 ## 1. Exploratory Data Analysis (EDA)
 
@@ -119,7 +140,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import (mean_absolute_error, mean_squared_error, r2_score,
+                             accuracy_score, confusion_matrix, ConfusionMatrixDisplay,
+                             f1_score, classification_report)
 from catboost import CatBoostRegressor
 import xgboost as xgb
 from xgboost.callback import EarlyStopping
@@ -129,13 +152,45 @@ import optuna
 import shap
 
 
-def calculate_mape(y_true, y_pred):
-    """MAPE robusto: excluye observaciones con y_true == 0 para evitar división por cero."""
-    y_true_non_zero = y_true[y_true != 0]
-    y_pred_non_zero = y_pred[y_true != 0]
-    if len(y_true_non_zero) == 0:
-        return np.nan
-    return np.mean(np.abs((y_true_non_zero - y_pred_non_zero) / y_true_non_zero)) * 100
+
+
+def plot_feature_importance(feature_names, importances, title, top_n=10, x_label='Importancia'):
+    """Grafica y retorna un DataFrame con la importancia de características ordenada."""
+    df_imp = pd.DataFrame({
+        'Feature': list(feature_names),
+        'Importance': importances
+    }).sort_values(by='Importance', ascending=False).head(top_n)
+    print(f"\n{title} (Top {top_n}):")
+    print(df_imp)
+    fig_h = 7 if top_n <= 10 else 8
+    font_sz = 9 if top_n <= 10 else 8
+    plt.figure(figsize=(12, fig_h))
+    sns.barplot(x='Importance', y='Feature', data=df_imp, palette='viridis')
+    plt.title(f'{title} (Top {top_n})')
+    plt.xlabel(x_label)
+    plt.ylabel('Característica')
+    for patch in plt.gca().patches:
+        plt.gca().annotate(
+            f'{patch.get_width():.2f}',
+            (patch.get_width(), patch.get_y() + patch.get_height() / 2.),
+            ha='left', va='center', fontsize=font_sz, weight='bold'
+        )
+    plt.tight_layout()
+    plt.show()
+    return df_imp
+
+
+def ohe_and_align(X_tr, X_va, X_te, cat_cols):
+    """One-Hot Encoding + alineación de columnas entre train, val y test."""
+    X_tr_enc = pd.get_dummies(X_tr, columns=cat_cols, drop_first=True)
+    X_va_enc = pd.get_dummies(X_va, columns=cat_cols, drop_first=True)
+    X_te_enc = pd.get_dummies(X_te, columns=cat_cols, drop_first=True)
+    cols = X_tr_enc.columns
+    for c in set(cols) - set(X_va_enc.columns):
+        X_va_enc[c] = 0
+    for c in set(cols) - set(X_te_enc.columns):
+        X_te_enc[c] = 0
+    return X_tr_enc, X_va_enc[cols], X_te_enc[cols]
 
 
 file_path = "D:\\Estudios\\Universidad\\Ciclo 7 2026-1\\Analisis multivariable\\Resiliencia Operativa\\10.3 RECLAMOS POR AVERÍAS.xlsx"
@@ -452,8 +507,10 @@ df_agg['Semester'] = (df_agg['Mes'].dt.month - 1) // 6 + 1
 print("\nAggregated DataFrame head with new temporal features:")
 print(df_agg.head())
 
-# --- Re-calculando Resiliencia Operativa en Datos Agregados ---
-# Re-calculamos Resiliencia_Operativa y su categoría en los datos agregados
+# --- Resiliencia Operativa en datos agregados (pre-split) ---
+# NOTA: p33/p66 se calculan aquí sobre todo df_agg para uso exploratorio/visualización.
+# Resiliencia_Operativa_Category se EXCLUYE de X (línea 640), por lo que no contamina
+# el entrenamiento. La categorización final para métricas usa umbrales del train set.
 df_agg['Resiliencia_Operativa'] = 1 / (1 + df_agg['Num_Reclamos_por_averia_Aggregated'])
 p33_ro_agg = df_agg['Resiliencia_Operativa'].quantile(0.33)
 p66_ro_agg = df_agg['Resiliencia_Operativa'].quantile(0.66)
@@ -647,7 +704,7 @@ print(f"R-squared (R2): {r2_cat:.4f}")
 # Snapshot de métricas BASE (antes de la optimización con Optuna), ya que mae_cat/rmse_cat/...
 # se SOBRESCRIBEN más adelante con el modelo optimizado. Se usan en las tablas comparativas base.
 mae_cat_base, rmse_cat_base, r2_cat_base = mae_cat, rmse_cat, r2_cat
-mape_cat_base = calculate_mape(y_test[y_test != 0], y_pred_cat[y_test != 0])
+mse_cat_base = mean_squared_error(y_test, y_pred_cat)
 
 """#### 3.3.2 Reentrenamiento del Regresor XGBoost con Nuevas Características Temporales
 
@@ -658,27 +715,8 @@ mape_cat_base = calculate_mape(y_test[y_test != 0], y_pred_cat[y_test != 0])
 
 print("\nRe-training XGBoost Regressor with new temporal features...")
 
-# XGBoost requiere datos numéricos. Realiza una codificación «one-hot» de las características categóricas para XGBoost.
-# Estas son las columnas que se convirtieron al tipo de datos «category» en X_train
 categorical_cols_ohe_xgb = X_train.select_dtypes(include='category').columns.tolist()
-
-X_train_xgb = pd.get_dummies(X_train, columns=categorical_cols_ohe_xgb, drop_first=True)
-X_val_xgb = pd.get_dummies(X_val, columns=categorical_cols_ohe_xgb, drop_first=True)
-X_test_xgb = pd.get_dummies(X_test, columns=categorical_cols_ohe_xgb, drop_first=True)
-
-# Alinear columnas: fundamental para mantener la coherencia de los conjuntos de características en los
-#conjuntos de entrenamiento, validación y prueba
-train_cols = X_train_xgb.columns
-val_cols = X_val_xgb.columns
-test_cols = X_test_xgb.columns
-
-missing_in_val = set(train_cols) - set(val_cols)
-for c in missing_in_val: X_val_xgb[c] = 0
-missing_in_test = set(train_cols) - set(test_cols)
-for c in missing_in_test: X_test_xgb[c] = 0
-
-X_val_xgb = X_val_xgb[train_cols]
-X_test_xgb = X_test_xgb[train_cols]
+X_train_xgb, X_val_xgb, X_test_xgb = ohe_and_align(X_train, X_val, X_test, categorical_cols_ohe_xgb)
 
 # Convertir datos al formato DMatrix
 dtrain = xgb.DMatrix(X_train_xgb, label=y_train)
@@ -730,67 +768,30 @@ print(f"R-squared (R2): {r2_xgb:.4f}")
 
 # Snapshot de métricas BASE de XGBoost (se sobrescriben luego con el modelo optimizado).
 mae_xgb_base, rmse_xgb_base, r2_xgb_base = mae_xgb, rmse_xgb, r2_xgb
-mape_xgb_base = calculate_mape(y_test[y_test != 0], y_pred_xgb[y_test != 0])
+mse_xgb_base = mean_squared_error(y_test, y_pred_xgb)
 
 """### Re-calculating Feature Importance with new Temporal Features"""
 
 print("\nRe-calculating Feature Importance for CatBoost and XGBoost with new temporal features...")
 
-# Importancia de las características en CatBoost
-# Obtén la importancia de las características en CatBoost; ya admite nombres categóricos nativos.
-cat_feature_importance = pd.DataFrame({
-    'Feature': X_train.columns,
-    'Importance': cat_model.get_feature_importance()
-}).sort_values(by='Importance', ascending=False)
+cat_feature_importance = plot_feature_importance(
+    X_train.columns, cat_model.get_feature_importance(),
+    'Importancia - CatBoost (modelos base, características temporales)'
+)
 
-print("\nCatBoost Feature Importance (Top 10) with temporal features:")
-print(cat_feature_importance.head(10))
-
-plt.figure(figsize=(12, 7))
-sns.barplot(x='Importance', y='Feature', data=cat_feature_importance.head(10), palette='viridis')
-plt.title('CatBoost Feature Importance (Top 10) with temporal features')
-plt.xlabel('Importance')
-plt.ylabel('Feature')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=9, weight='bold')
-plt.show()
-
-
-# Importancia de las características en XGBoost
-# Los nombres de las características de XGBoost provienen de X_train_xgb (codificadas en one-hot)
 xgb_importances_dict = trained_xgb_model.get_score(importance_type='gain')
-
-# Crear un DataFrame para la importancia de las características, asegurándose de que se incluyan todas las características de X_train_xgb
-xgb_feature_importance = pd.DataFrame({
-    'Feature': X_train_xgb.columns,
-    'Importance': X_train_xgb.columns.map(xgb_importances_dict).fillna(0)
-}).sort_values(by='Importance', ascending=False)
-
-print("\nXGBoost Feature Importance (Top 10) with temporal features:")
-print(xgb_feature_importance.head(10))
-
-plt.figure(figsize=(12, 7))
-sns.barplot(x='Importance', y='Feature', data=xgb_feature_importance.head(10), palette='viridis')
-plt.title('XGBoost Feature Importance (Top 10) with temporal features')
-plt.xlabel('Importance (Gain)')
-plt.ylabel('Feature')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=9, weight='bold')
-plt.show()
+xgb_feature_importance = plot_feature_importance(
+    X_train_xgb.columns,
+    X_train_xgb.columns.map(xgb_importances_dict).fillna(0),
+    'Importancia - XGBoost (modelo base, características temporales)',
+    x_label='Importancia (Ganancia)'
+)
 
 """### Model Training: CatBoost Regressor"""
 
 print("\n### FASE 7: OPTIMIZACIÓN DE MODELOS (CatBoost con Optuna)")
 
-# Identificar características categóricas para pasarlas a CatBoost de forma nativa
-cat_features_for_catboost = X_train.select_dtypes(include='category').columns.tolist()
-
-print(f"Categorical features for CatBoost: {cat_features_for_catboost}")
-
 def objective_catboost(trial):
-    # Hiperparámetros que se deben ajustar en CatBoost
     params = {
         'iterations': trial.suggest_int('iterations', 100, 2000),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
@@ -802,15 +803,26 @@ def objective_catboost(trial):
         'random_seed': 42,
         'verbose': 0,
         'early_stopping_rounds': 50,
-        'cat_features': cat_features_for_catboost
     }
 
-    model = CatBoostRegressor(**params)
-    model.fit(X_train, y_train, eval_set=(X_val, y_val), early_stopping_rounds=50, verbose=0)
+    # CV temporal con 2 splits para evitar overfitting a un único conjunto de validación
+    tscv = TimeSeriesSplit(n_splits=3)
+    X_tr_full = pd.concat([X_train, X_val])
+    y_tr_full = pd.concat([y_train, y_val])
 
-    y_pred_val = model.predict(X_val)
-    rmse_val = np.sqrt(mean_squared_error(y_val, y_pred_val))
-    return rmse_val
+    rmses = []
+    for tr_idx, va_idx in tscv.split(X_tr_full):
+        X_cv_tr, X_cv_va = X_tr_full.iloc[tr_idx], X_tr_full.iloc[va_idx]
+        y_cv_tr, y_cv_va = y_tr_full.iloc[tr_idx], y_tr_full.iloc[va_idx]
+
+        # cat_features como índices posicionales dentro del slice actual
+        cat_idx = [X_cv_tr.columns.get_loc(c) for c in cat_features_for_catboost if c in X_cv_tr.columns]
+
+        m = CatBoostRegressor(**params, cat_features=cat_idx)
+        m.fit(X_cv_tr, y_cv_tr, eval_set=(X_cv_va, y_cv_va), verbose=0)
+        rmses.append(np.sqrt(mean_squared_error(y_cv_va, m.predict(X_cv_va))))
+
+    return np.mean(rmses)
 
 print("Starting Optuna optimization for CatBoost...")
 study_catboost = optuna.create_study(direction='minimize', study_name='CatBoost_Optimization')
@@ -838,21 +850,18 @@ print("CatBoost Regressor training with optimized hyperparameters complete.")
 # Realizar predicciones sobre el conjunto de prueba
 y_pred_cat = cat_model.predict(X_test)
 
-# Evaluar el modelo (incluido el MAPE)
+# Evaluar el modelo
 mae_cat = mean_absolute_error(y_test, y_pred_cat)
 rmse_cat = np.sqrt(mean_squared_error(y_test, y_pred_cat))
 r2_cat = r2_score(y_test, y_pred_cat)
 
-# Eliminar los valores cero de y_test para evitar la división por cero en el MAPE
-y_test_mape = y_test[y_test != 0]
-y_pred_cat_mape = y_pred_cat[y_test != 0]
-mape_cat = calculate_mape(y_test_mape, y_pred_cat_mape)
+mse_cat = mean_squared_error(y_test, y_pred_cat)
 
 print(f"\nCatBoost Regressor Performance on Test Set (Optimized):")
 print(f"Mean Absolute Error (MAE): {mae_cat:.4f}")
 print(f"Root Mean Squared Error (RMSE): {rmse_cat:.4f}")
 print(f"R-squared (R2): {r2_cat:.4f}")
-print(f"Mean Absolute Percentage Error (MAPE): {mape_cat:.4f}%")
+print(f"Mean Squared Error (MSE): {mse_cat:.4f}%")
 
 """#### 3.3.4 Optimización del Regresor XGBoost con Optuna
 
@@ -863,26 +872,9 @@ print(f"Mean Absolute Percentage Error (MAPE): {mape_cat:.4f}%")
 
 print("\n### FASE 8: OPTIMIZACIÓN DE MODELOS (XGBoost con Optuna)")
 
-# XGBoost requiere entrada numérica. Codificación One-Hot de características categóricas para XGBoost.
-# Estas son las columnas que se convirtieron al tipo 'category' en X_train
+# Regenerar OHE con los mismos parámetros para asegurar consistencia tras Optuna
 categorical_cols_ohe_xgb = X_train.select_dtypes(include='category').columns.tolist()
-
-X_train_xgb = pd.get_dummies(X_train, columns=categorical_cols_ohe_xgb, drop_first=True)
-X_val_xgb = pd.get_dummies(X_val, columns=categorical_cols_ohe_xgb, drop_first=True)
-X_test_xgb = pd.get_dummies(X_test, columns=categorical_cols_ohe_xgb, drop_first=True)
-
-# Alinear columnas - crucial para conjuntos de características consistentes en entrenamiento, validación y prueba
-train_cols = X_train_xgb.columns
-val_cols = X_val_xgb.columns
-test_cols = X_test_xgb.columns
-
-missing_in_val = set(train_cols) - set(val_cols)
-for c in missing_in_val: X_val_xgb[c] = 0
-missing_in_test = set(train_cols) - set(test_cols)
-for c in missing_in_test: X_test_xgb[c] = 0
-
-X_val_xgb = X_val_xgb[train_cols]
-X_test_xgb = X_test_xgb[train_cols]
+X_train_xgb, X_val_xgb, X_test_xgb = ohe_and_align(X_train, X_val, X_test, categorical_cols_ohe_xgb)
 
 # Convertir datos a formato DMatrix
 dtrain = xgb.DMatrix(X_train_xgb, label=y_train)
@@ -956,21 +948,18 @@ print("Entrenamiento del regresor XGBoost con hiperparámetros optimizados compl
 # Realizar predicciones sobre el conjunto de prueba
 y_pred_xgb = trained_xgb_model.predict(dtest)
 
-# Evaluar el modelo (incluyendo MAPE)
+# Evaluar el modelo
 mae_xgb = mean_absolute_error(y_test, y_pred_xgb)
 rmse_xgb = np.sqrt(mean_squared_error(y_test, y_pred_xgb))
 r2_xgb = r2_score(y_test, y_pred_xgb)
 
-# Filtrar valores cero de y_test para evitar la división por cero en MAPE
-y_test_mape_xgb = y_test[y_test != 0]
-y_pred_xgb_mape = y_pred_xgb[y_test != 0]
-mape_xgb = calculate_mape(y_test_mape_xgb, y_pred_xgb_mape)
+mse_xgb = mean_squared_error(y_test, y_pred_xgb)
 
 print(f"\nXGBoost Regressor Performance en el conjunto de prueba (Optimizado):")
 print(f"Error Absoluto Medio (MAE): {mae_xgb:.4f}")
 print(f"Raíz del Error Cuadrático Medio (RMSE): {rmse_xgb:.4f}")
 print(f"R-squared (R2): {r2_xgb:.4f}")
-print(f"Error Porcentual Absoluto Medio (MAPE): {mape_xgb:.4f}%")
+print(f"Error Cuadrático Medio (MSE): {mse_xgb:.4f}%")
 
 """### Model Training: LightGBM Regressor
 
@@ -994,9 +983,9 @@ for col in cat_features_for_lgbm:
     X_val[col] = X_val[col].astype('category')
     X_test[col] = X_test[col].astype('category')
 
-# Inicializar el Regresor LightGBM
+# Inicializar LightGBM con objetivo Poisson (apropiado para datos de conteo)
 lgbm_model = lgb.LGBMRegressor(
-    objective='regression_l1',
+    objective='poisson',
     metric='rmse',
     n_estimators=1000,
     learning_rate=0.05,
@@ -1026,15 +1015,13 @@ mae_lgbm = mean_absolute_error(y_test, y_pred_lgbm)
 rmse_lgbm = np.sqrt(mean_squared_error(y_test, y_pred_lgbm))
 r2_lgbm = r2_score(y_test, y_pred_lgbm)
 
-y_test_mape_lgbm_base = y_test[y_test != 0]
-y_pred_lgbm_mape_base = y_pred_lgbm[y_test != 0]
-mape_lgbm = calculate_mape(y_test_mape_lgbm_base, y_pred_lgbm_mape_base)
+mse_lgbm = mean_squared_error(y_test, y_pred_lgbm)
 
 print(f"\nLightGBM Regressor Performance en el conjunto de prueba (con características temporales):")
 print(f"Error Absoluto Medio (MAE): {mae_lgbm:.4f}")
 print(f"Raíz del Error Cuadrático Medio (RMSE): {rmse_lgbm:.4f}")
 print(f"R-squared (R2): {r2_lgbm:.4f}")
-print(f"Mean Absolute Percentage Error (MAPE): {mape_lgbm:.4f}%")
+print(f"Mean Squared Error (MSE): {mse_lgbm:.4f}%")
 
 """### Model Training: Random Forest Regressor
 
@@ -1044,41 +1031,10 @@ print(f"Mean Absolute Percentage Error (MAPE): {mape_lgbm:.4f}%")
 print("\n### FASE 10: ENTRENAMIENTO DE MODELOS (Random Forest)")
 print("Entrenando el Regresor Random Forest...")
 
-# Random Forest no maneja características categóricas de forma nativa, por lo que necesitan ser codificadas one-hot.
-# Usaremos los datos ya codificados one-hot X_train_xgb, X_val_xgb, X_test_xgb para consistencia, los cuales fueron creados para XGBoost.
-# Si X_train_xgb, X_val_xgb, X_test_xgb no están definidos, créalos usando get_dummies en X_train/val/test.
-
-# Verificar si X_train_xgb ya está definido (desde la celda de XGBoost)
-if 'X_train_xgb' not in locals():
-    print("Codificación One-Hot para Random Forest (recreando si es necesario)...")
-    categorical_cols_ohe_rf = X_train.select_dtypes(include='category').columns.tolist()
-
-    X_train_rf = pd.get_dummies(X_train, columns=categorical_cols_ohe_rf, drop_first=True)
-    X_val_rf = pd.get_dummies(X_val, columns=categorical_cols_ohe_rf, drop_first=True)
-    X_test_rf = pd.get_dummies(X_test, columns=categorical_cols_ohe_rf, drop_first=True)
-
-    # Alinear columnas
-    train_cols_rf = X_train_rf.columns
-    val_cols_rf = X_val_rf.columns
-    test_cols_rf = X_test_rf.columns
-
-    missing_in_val_rf = set(train_cols_rf) - set(val_cols_rf)
-    for c in missing_in_val_rf: X_val_rf[c] = 0
-    missing_in_test_rf = set(train_cols_rf) - set(test_cols_rf)
-    for c in missing_in_test_rf: X_test_rf[c] = 0
-
-    X_val_rf = X_val_rf[train_cols_rf]
-    X_test_rf = X_test_rf[train_cols_rf]
-
-    # Usar estos para Random Forest
-    X_train_rf_final = X_train_rf
-    X_val_rf_final = X_val_rf
-    X_test_rf_final = X_test_rf
-else:
-    print("Usando datos ya codificados One-Hot de XGBoost para Random Forest.")
-    X_train_rf_final = X_train_xgb
-    X_val_rf_final = X_val_xgb
-    X_test_rf_final = X_test_xgb
+# RF comparte el OHE generado para XGBoost (mismo espacio de características)
+X_train_rf_final = X_train_xgb
+X_val_rf_final   = X_val_xgb
+X_test_rf_final  = X_test_xgb
 
 
 # Inicializar el Regresor Random Forest
@@ -1105,15 +1061,13 @@ mae_rf = mean_absolute_error(y_test, y_pred_rf)
 rmse_rf = np.sqrt(mean_squared_error(y_test, y_pred_rf))
 r2_rf = r2_score(y_test, y_pred_rf)
 
-y_test_mape_rf_base = y_test[y_test != 0]
-y_pred_rf_mape_base = y_pred_rf[y_test != 0]
-mape_rf = calculate_mape(y_test_mape_rf_base, y_pred_rf_mape_base)
+mse_rf = mean_squared_error(y_test, y_pred_rf)
 
 print(f"\nRandom Forest Regressor Performance en el conjunto de prueba (con características temporales):")
 print(f"Error Absoluto Medio (MAE): {mae_rf:.4f}")
 print(f"Raíz del Error Cuadrático Medio (RMSE): {rmse_rf:.4f}")
 print(f"R-squared (R2): {r2_rf:.4f}")
-print(f"Mean Absolute Percentage Error (MAPE): {mape_rf:.4f}%")
+print(f"Mean Squared Error (MSE): {mse_rf:.4f}%")
 
 """## 4. Model Comparison and Feature Importance Analysis
 
@@ -1135,14 +1089,24 @@ performance_data = {
     'MAE': [mae_cat_base, mae_xgb_base, mae_lgbm, mae_rf],
     'RMSE': [rmse_cat_base, rmse_xgb_base, rmse_lgbm, rmse_rf],
     'R-squared': [r2_cat_base, r2_xgb_base, r2_lgbm, r2_rf],
-    'MAPE': [mape_cat_base, mape_xgb_base, mape_lgbm, mape_rf]
+    'MSE': [mse_cat_base, mse_xgb_base, mse_lgbm, mse_rf]
 }
 
 # Crear un DataFrame para facilitar la comparación
 performance_df = pd.DataFrame(performance_data)
 
-print("\nComparación del Rendimiento del Modelo:")
+print("\n" + "="*60)
+print("  [TABLA 1 de 3] MODELOS BASE — sin optimización Optuna")
+print("  Referencia de partida. Úsala para ver cuánto mejora Optuna.")
+print("="*60)
 print(performance_df.round(4))
+with open('metricas_modelos_base.txt', 'w', encoding='utf-8') as _f:
+    _f.write("[TABLA 1 de 3] MODELOS BASE — sin optimización Optuna\n")
+    _f.write("Referencia de partida. Úsala para ver cuánto mejora Optuna.\n")
+    _f.write("="*60 + "\n")
+    _f.write(performance_df.round(4).to_string(index=False))
+    _f.write("\n")
+print("  >> Guardado en: metricas_modelos_base.txt")
 
 # Resaltar el modelo de mejor rendimiento para cada métrica
 def highlight_min(s):
@@ -1154,37 +1118,38 @@ def highlight_max(s):
     return ['background-color: lightgreen' if v else '' for v in is_max]
 
 styled_performance_df = performance_df.style \
-    .apply(highlight_min, subset=['MAE', 'RMSE', 'MAPE']) \
+    .apply(highlight_min, subset=['MAE', 'RMSE', 'MSE']) \
     .apply(highlight_max, subset=['R-squared'])
 
 print("\nComparación del Rendimiento del Modelo (con resaltados para el mejor rendimiento):")
 print(styled_performance_df)
 
 # ==================================================
-# B. EVALUACIÓN DEL RENDIMIENTO DE LOS MODELOS (BASE)
+# B. EVALUACIÓN DEL RENDIMIENTO DE LOS MODELOS (BASE — sin Optuna)
 # ==================================================
 
-# 1. Diccionario corregido con tus cuatro modelos reales
-# Usamos los valores calculados directamente de las variables mae_cat, rmse_cat, r2_cat, etc.
+# Todos los modelos en su versión BASE (pre-Optuna).
+# CatBoost y XGBoost usan snapshots *_base; LightGBM y RF aún no han sido optimizados.
 datos_rendimiento = {
     'Modelo': ['CatBoost Regressor', 'XGBoost Regressor', 'LightGBM Regressor', 'Random Forest Regressor'],
-    'MAE': [mae_cat, mae_xgb, mae_lgbm, mae_rf],
-    'RMSE': [rmse_cat, rmse_xgb, rmse_lgbm, rmse_rf],
-    'R²': [r2_cat, r2_xgb, r2_lgbm, r2_rf],
-    'MAPE': [mape_cat, mape_xgb, mape_lgbm, mape_rf]
+    'MAE':  [mae_cat_base,  mae_xgb_base,  mae_lgbm,  mae_rf],
+    'RMSE': [rmse_cat_base, rmse_xgb_base, rmse_lgbm, rmse_rf],
+    'R²':   [r2_cat_base,   r2_xgb_base,   r2_lgbm,   r2_rf],
+    'MSE': [mse_cat_base, mse_xgb_base, mse_lgbm, mse_rf]
 }
 
 # 2. Convertimos a DataFrame de Pandas
 df_metricas = pd.DataFrame(datos_rendimiento)
 
-print("==================================================")
-print("   B. EVALUACIÓN DEL RENDIMIENTO DE LOS MODELOS (BASE)   ")
-print("==================================================\n")
-print("--- TABLA COMPARATIVA DE MÉTRICAS (BASE MODELS) ---")
+print("="*60)
+print("  [TABLA 2 de 3] MODELOS BASE con gráfico — sin Optuna")
+print("  Mismo contenido que Tabla 1, con visualización de barras.")
+print("  MAE/RMSE/MSE: menor es mejor | R²: mayor es mejor.")
+print("="*60)
 print(df_metricas.to_string(index=False))
 print("-" * 50)
 
-# 3. Gráfico Académico Comparativo (Métricas clave: R², RMSE, MAE, MAPE)
+# 3. Gráfico Académico Comparativo (Métricas clave: R², RMSE, MAE, MSE)
 fig, axes = plt.subplots(1, 4, figsize=(24, 6))
 fig.suptitle('Evaluación Comparativa: Modelos Base', fontsize=14, weight='bold', y=1.02)
 
@@ -1218,10 +1183,10 @@ for p in axes[2].patches:
     axes[2].annotate(f'{p.get_height():.2f}', (p.get_x() + p.get_width() / 2., p.get_height() + 20),
                 ha='center', va='center', weight='bold', fontsize=10)
 
-# Gráfico D: Error Porcentual Absoluto Medio MAPE (Menor es mejor)
-sns.barplot(data=df_metricas, x='Modelo', y='MAPE', ax=axes[3], palette='Reds', edgecolor='black', width=0.4)
-axes[3].set_title('Comparación del Error MAPE\n(Menor es mejor)', fontsize=12, pad=10)
-axes[3].set_ylabel('Valor del MAPE (%)')
+# Gráfico D: Error Cuadrático Medio MSE (Menor es mejor)
+sns.barplot(data=df_metricas, x='Modelo', y='MSE', ax=axes[3], palette='Reds', edgecolor='black', width=0.4)
+axes[3].set_title('Comparación del Error MSE\n(Menor es mejor)', fontsize=12, pad=10)
+axes[3].set_ylabel('Valor del MSE')
 axes[3].set_xlabel('Modelos Evaluados')
 axes[3].grid(axis='y', linestyle='--', alpha=0.5)
 for p in axes[3].patches:
@@ -1236,81 +1201,49 @@ plt.show()
 ### 4.3 Comparación del Rendimiento del Modelo (Actualizado)
 """
 
-print("\nRecalculando la Importancia de Características para CatBoost y XGBoost con nuevas características temporales...")
-
-# Importancia de las características en CatBoost
-# Obtén la importancia de las características en CatBoost; ya admite nombres categóricos nativos.
-cat_feature_importance = pd.DataFrame({
-    'Feature': X_train.columns,
-    'Importance': cat_model.get_feature_importance()
-}).sort_values(by='Importance', ascending=False).head(20)
-
-print("\nImportancia de las Características de CatBoost (Top 20) con características temporales:")
-print(cat_feature_importance.head(10))
-
-plt.figure(figsize=(12, 7))
-sns.barplot(x='Importance', y='Feature', data=cat_feature_importance.head(10), palette='viridis')
-plt.title('Importancia de las Características de CatBoost (Top 10) con características temporales')
-plt.xlabel('Importancia')
-plt.ylabel('Característica')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=9, weight='bold')
-plt.show()
-
-
-# Importancia de las características en XGBoost
-# Los nombres de las características de XGBoost provienen de X_train_xgb (codificadas en one-hot)
-xgb_importances_dict = trained_xgb_model.get_score(importance_type='gain')
-
-# Crear un DataFrame para la importancia de las características, asegurándose de que se incluyan todas las características de X_train_xgb
-xgb_feature_importance = pd.DataFrame({
-    'Feature': X_train_xgb.columns,
-    'Importance': X_train_xgb.columns.map(xgb_importances_dict).fillna(0)
-}).sort_values(by='Importance', ascending=False)
-
-print("\nImportancia de las Características de XGBoost (Top 10) con características temporales:")
-print(xgb_feature_importance.head(10))
-
-plt.figure(figsize=(12, 7))
-sns.barplot(x='Importance', y='Feature', data=xgb_feature_importance.head(10), palette='viridis')
-plt.title('Importancia de las Características de XGBoost (Top 10) con características temporales')
-plt.xlabel('Importancia (Ganancia)')
-plt.ylabel('Característica')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=9, weight='bold')
-plt.show()
 
 """### FASE 8: EVALUACIÓN CIENTÍFICA (Comparación de Modelos Actualizada)
 
 ### 4.4 Análisis de Importancia de Características (Actualizado)
 """
 
-# Create a dictionary to store model performance for all trained models
+# Tabla intermedia: CatBoost y XGBoost ya optimizados; LightGBM y RF todavía son base
 performance_data = {
     'Model': [
-        'CatBoost Regressor',
-        'XGBoost Regressor',
-        'LightGBM Regressor',
-        'Random Forest Regressor'
+        'CatBoost (Optimizado)',
+        'XGBoost (Optimizado)',
+        'LightGBM (BASE — aún sin Optuna)',
+        'Random Forest (BASE — aún sin Optuna)'
     ],
-    'MAE': [mae_cat, mae_xgb, mae_lgbm, mae_rf],
-    'RMSE': [rmse_cat, rmse_xgb, rmse_lgbm, rmse_rf],
-    'R-squared': [r2_cat, r2_xgb, r2_lgbm, r2_rf]
+    'MAE':       [mae_cat,  mae_xgb,  mae_lgbm,  mae_rf],
+    'RMSE':      [rmse_cat, rmse_xgb, rmse_lgbm, rmse_rf],
+    'R-squared': [r2_cat,   r2_xgb,   r2_lgbm,   r2_rf],
+    'MSE':      [mse_cat, mse_xgb, mse_lgbm, mse_rf]
 }
 
-# Create a DataFrame for easy comparison
 performance_df = pd.DataFrame(performance_data)
 
-print("\nModel Performance Comparison (Updated with LightGBM and Random Forest):")
+print("\n" + "="*60)
+print("  [TABLA INTERMEDIA] Estado parcial de optimización")
+print("  CatBoost y XGBoost: ya con Optuna.")
+print("  LightGBM y RF: todavía son modelos base (Optuna aún no corrió).")
+print("  ⚠ NO usar esta tabla para comparar modelos entre sí.")
+print("="*60)
 print(performance_df.round(4))
+with open('metricas_intermedia.txt', 'w', encoding='utf-8') as _f:
+    _f.write("[TABLA INTERMEDIA] Estado parcial de optimización\n")
+    _f.write("CatBoost y XGBoost: ya con Optuna. LightGBM y RF: todavía base.\n")
+    _f.write("⚠ NO usar para comparar modelos entre sí.\n")
+    _f.write("="*60 + "\n")
+    _f.write(performance_df.round(4).to_string(index=False))
+    _f.write("\n")
+print("  >> Guardado en: metricas_intermedia.txt")
 
 styled_performance_df = performance_df.style \
-    .apply(highlight_min, subset=['MAE', 'RMSE']) \
+    .apply(highlight_min, subset=['MAE', 'RMSE', 'MSE']) \
     .apply(highlight_max, subset=['R-squared'])
 
-print("\nModel Performance Comparison (with highlights for best performance):")
+print("\n(con resaltados de mejor por métrica):")
 print(styled_performance_df)
 
 # --- Visual Comparison of Metrics ---
@@ -1355,111 +1288,14 @@ plt.show()
 ### 4.5 Valores SHAP para la Interpretabilidad del Modelo
 """
 
-print("\nRe-calculating Feature Importance for all models...")
-
-# --- CatBoost Feature Importance ---
-cat_feature_importance = pd.DataFrame({
-    'Feature': X_train.columns,
-    'Importance': cat_model.get_feature_importance()
-}).sort_values(by='Importance', ascending=False).head(20)
-
-print("\nCatBoost Feature Importance (Top 20):")
-print(cat_feature_importance)
-
-plt.figure(figsize=(12, 8))
-sns.barplot(x='Importance', y='Feature', data=cat_feature_importance, palette='viridis')
-plt.title('CatBoost Feature Importance (Top 20)')
-plt.xlabel('Importance')
-plt.ylabel('Feature')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=8, weight='bold')
-plt.tight_layout()
-plt.show()
-
-# --- XGBoost Feature Importance ---
-xgb_importances_dict = trained_xgb_model.get_score(importance_type='gain')
-# Ensure using correct feature names from one-hot encoded X_train_xgb
-xgb_feature_importance = pd.DataFrame({
-    'Feature': X_train_xgb.columns,
-    'Importance': X_train_xgb.columns.map(xgb_importances_dict).fillna(0)
-}).sort_values(by='Importance', ascending=False).head(20)
-
-print("\nXGBoost Feature Importance (Top 20):")
-print(xgb_feature_importance)
-
-plt.figure(figsize=(12, 8))
-sns.barplot(x='Importance', y='Feature', data=xgb_feature_importance, palette='viridis')
-plt.title('XGBoost Feature Importance (Top 20)')
-plt.xlabel('Importance (Gain)')
-plt.ylabel('Feature')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=8, weight='bold')
-plt.tight_layout()
-plt.show()
-
-# --- LightGBM Feature Importance ---
-lgbm_feature_importance = pd.DataFrame({
-    'Feature': X_train.columns,
-    'Importance': lgbm_model.feature_importances_
-}).sort_values(by='Importance', ascending=False).head(20)
-
-print("\nLightGBM Feature Importance (Top 20):")
-print(lgbm_feature_importance)
-
-plt.figure(figsize=(12, 8))
-sns.barplot(x='Importance', y='Feature', data=lgbm_feature_importance, palette='viridis')
-plt.title('LightGBM Feature Importance (Top 20)')
-plt.xlabel('Importance')
-plt.ylabel('Feature')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=8, weight='bold')
-plt.tight_layout()
-plt.show()
-
-# --- Random Forest Feature Importance ---
-# Ensure using correct feature names from one-hot encoded X_train_rf_final
-rf_feature_importance = pd.DataFrame({
-    'Feature': X_train_rf_final.columns,
-    'Importance': rf_model.feature_importances_
-}).sort_values(by='Importance', ascending=False).head(20)
-
-print("\nRandom Forest Feature Importance (Top 20):")
-print(rf_feature_importance)
-
-plt.figure(figsize=(12, 8))
-sns.barplot(x='Importance', y='Feature', data=rf_feature_importance, palette='viridis')
-plt.title('Random Forest Feature Importance (Top 20)')
-plt.xlabel('Importance')
-plt.ylabel('Feature')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=8, weight='bold')
-plt.tight_layout()
-plt.show()
-
 print("\n### FASE 11: OPTIMIZACIÓN DE MODELOS (LightGBM con Optuna)")
 
-# LightGBM puede manejar características categóricas de forma nativa si se especifica.
-# Espera que las características categóricas estén codificadas como enteros o como tipo de datos 'category'.
-# X_train ya tiene las características categóricas como tipo de datos 'category'.
-
-# Identificar características categóricas para LightGBM
 cat_features_for_lgbm = X_train.select_dtypes(include='category').columns.tolist()
-
-# Convertir características categóricas a tipo de datos 'category' para LightGBM, si aún no lo están.
-# (Este paso es técnicamente redundante si `df_prepared` ya las estableció, pero es bueno para la robustez)
-for col in cat_features_for_lgbm:
-    X_train[col] = X_train[col].astype('category')
-    X_val[col] = X_val[col].astype('category')
-    X_test[col] = X_test[col].astype('category')
 
 def objective_lgbm(trial):
     # Hiperparámetros a ajustar para LightGBM
     params = {
-        'objective': 'regression_l1',
+        'objective': 'poisson',
         'metric': 'rmse',
         'n_estimators': trial.suggest_int('n_estimators', 100, 2000),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
@@ -1498,7 +1334,7 @@ print(study_lgbm.best_params)
 # Volver a entrenar LightGBM con los mejores hiperparámetros en X_train + X_val para el modelo final
 print("Reentrenando LightGBM con hiperparámetros optimizados en el conjunto de entrenamiento completo...")
 best_lgbm_params = study_lgbm.best_params.copy()
-best_lgbm_params['objective'] = 'regression_l1'
+best_lgbm_params['objective'] = 'poisson'
 best_lgbm_params['metric'] = 'rmse'
 best_lgbm_params['random_state'] = 42
 best_lgbm_params['n_jobs'] = -1
@@ -1517,51 +1353,26 @@ print("Entrenamiento del Regresor LightGBM con hiperparámetros optimizados comp
 # Realizar predicciones sobre el conjunto de prueba
 y_pred_lgbm = lgbm_model.predict(X_test)
 
-# Evaluar el modelo (incluyendo MAPE)
+# Evaluar el modelo
 mae_lgbm = mean_absolute_error(y_test, y_pred_lgbm)
 rmse_lgbm = np.sqrt(mean_squared_error(y_test, y_pred_lgbm))
 r2_lgbm = r2_score(y_test, y_pred_lgbm)
 
-# Filtrar valores cero de y_test para evitar la división por cero en MAPE
-y_test_mape_lgbm = y_test[y_test != 0]
-y_pred_lgbm_mape = y_pred_lgbm[y_test != 0]
-mape_lgbm = calculate_mape(y_test_mape_lgbm, y_pred_lgbm_mape)
+mse_lgbm = mean_squared_error(y_test, y_pred_lgbm)
 
 print(f"\nLightGBM Regressor Performance en el conjunto de prueba (Optimizado):")
 print(f"Error Absoluto Medio (MAE): {mae_lgbm:.4f}")
 print(f"Raíz del Error Cuadrático Medio (RMSE): {rmse_lgbm:.4f}")
 print(f"R-squared (R2): {r2_lgbm:.4f}")
-print(f"Error Porcentual Absoluto Medio (MAPE): {mape_lgbm:.4f}%")
+print(f"Error Cuadrático Medio (MSE): {mse_lgbm:.4f}%")
 
 print("\n### FASE 12: OPTIMIZACIÓN DE MODELOS (Random Forest con Optuna)")
 
-# Random Forest no maneja características categóricas de forma nativa, por lo que necesitan ser codificadas one-hot.
-# Usar los datos ya codificados one-hot X_train_xgb, X_val_xgb, X_test_xgb para consistencia.
-# Si no están definidos, recréalos.
-
-# Identificar columnas categóricas para codificar one-hot para Random Forest
+# RF comparte el mismo OHE que XGBoost (ya calculado en FASE 8)
 categorical_cols_ohe_rf = X_train.select_dtypes(include='category').columns.tolist()
-
-X_train_rf = pd.get_dummies(X_train, columns=categorical_cols_ohe_rf, drop_first=True)
-X_val_rf = pd.get_dummies(X_val, columns=categorical_cols_ohe_rf, drop_first=True)
-X_test_rf = pd.get_dummies(X_test, columns=categorical_cols_ohe_rf, drop_first=True)
-
-# Alinear columnas
-train_cols_rf = X_train_rf.columns
-val_cols_rf = X_val_rf.columns
-test_cols_rf = X_test_rf.columns
-
-missing_in_val_rf = set(train_cols_rf) - set(val_cols_rf)
-for c in missing_in_val_rf: X_val_rf[c] = 0
-missing_in_test_rf = set(train_cols_rf) - set(test_cols_rf)
-for c in missing_in_test_rf: X_test_rf[c] = 0
-
-X_val_rf = X_val_rf[train_cols_rf]
-X_test_rf = X_test_rf[train_cols_rf]
-
-X_train_rf_final = X_train_rf
-X_val_rf_final = X_val_rf
-X_test_rf_final = X_test_rf
+X_train_rf_final, X_val_rf_final, X_test_rf_final = ohe_and_align(
+    X_train, X_val, X_test, categorical_cols_ohe_rf
+)
 
 def objective_rf(trial):
     # Hiperparámetros a ajustar para Random Forest
@@ -1610,27 +1421,50 @@ print("Entrenamiento del Regresor Random Forest con hiperparámetros optimizados
 # Realizar predicciones sobre el conjunto de prueba
 y_pred_rf = rf_model.predict(X_test_rf_final)
 
-# Evaluar el modelo (incluyendo MAPE)
+# Evaluar el modelo
 mae_rf = mean_absolute_error(y_test, y_pred_rf)
 rmse_rf = np.sqrt(mean_squared_error(y_test, y_pred_rf))
 r2_rf = r2_score(y_test, y_pred_rf)
 
-# Filtrar valores cero de y_test para evitar la división por cero en MAPE
-y_test_mape_rf = y_test[y_test != 0]
-y_pred_rf_mape = y_pred_rf[y_test != 0]
-mape_rf = calculate_mape(y_test_mape_rf, y_pred_rf_mape)
+mse_rf = mean_squared_error(y_test, y_pred_rf)
 
 print(f"\nRandom Forest Regressor Performance en el conjunto de prueba (Optimizado):")
 print(f"Error Absoluto Medio (MAE): {mae_rf:.4f}")
 print(f"Raíz del Error Cuadrático Medio (RMSE): {rmse_rf:.4f}")
 print(f"R-squared (R2): {r2_rf:.4f}")
-print(f"Error Porcentual Absoluto Medio (MAPE): {mape_rf:.4f}%")
+print(f"Error Cuadrático Medio (MSE): {mse_rf:.4f}%")
+
+# --- Importancia de características: los 4 modelos YA optimizados ---
+print("\n" + "="*60)
+print("  IMPORTANCIA DE CARACTERÍSTICAS — 4 MODELOS OPTIMIZADOS")
+print("="*60)
+
+cat_feature_importance = plot_feature_importance(
+    X_train.columns, cat_model.get_feature_importance(),
+    'Importancia - CatBoost (optimizado con Optuna)', top_n=20
+)
+
+xgb_importances_dict = trained_xgb_model.get_score(importance_type='gain')
+xgb_feature_importance = plot_feature_importance(
+    X_train_xgb.columns,
+    X_train_xgb.columns.map(xgb_importances_dict).fillna(0),
+    'Importancia - XGBoost (optimizado con Optuna)', top_n=20, x_label='Importancia (Ganancia)'
+)
+
+lgbm_feature_importance = plot_feature_importance(
+    X_train.columns, lgbm_model.feature_importances_,
+    'Importancia - LightGBM (optimizado con Optuna)', top_n=20
+)
+
+rf_feature_importance = plot_feature_importance(
+    X_train_rf_final.columns, rf_model.feature_importances_,
+    'Importancia - Random Forest (optimizado con Optuna)', top_n=20
+)
 
 """FASE 8: EVALUACIÓN CIENTÍFICA (Tabla Comparativa y Ranking Final de Modelos"""
 
 print("\n### FASE 13: EVALUACIÓN CIENTÍFICA (Tabla Comparativa y Ranking Final de Modelos)\n")
 
-# Crear un diccionario para almacenar el rendimiento de todos los modelos optimizados
 performance_data = {
     'Model': [
         'CatBoost Regressor (Optimizado)',
@@ -1638,23 +1472,36 @@ performance_data = {
         'LightGBM Regressor (Optimizado)',
         'Random Forest Regressor (Optimizado)'
     ],
-    'MAE': [mae_cat, mae_xgb, mae_lgbm, mae_rf],
-    'RMSE': [rmse_cat, rmse_xgb, rmse_lgbm, rmse_rf],
-    'R-squared': [r2_cat, r2_xgb, r2_lgbm, r2_rf],
-    'MAPE': [mape_cat, mape_xgb, mape_lgbm, mape_rf]
+    'MAE':       [mae_cat,  mae_xgb,  mae_lgbm,  mae_rf],
+    'RMSE':      [rmse_cat, rmse_xgb, rmse_lgbm, rmse_rf],
+    'R-squared': [r2_cat,   r2_xgb,   r2_lgbm,   r2_rf],
+    'MSE':      [mse_cat, mse_xgb, mse_lgbm, mse_rf]
 }
 
-# Crear un DataFrame para facilitar la comparación
 performance_df = pd.DataFrame(performance_data)
 
-print("\nComparación del rendimiento de todos los modelos optimizados:")
+print("\n" + "="*60)
+print("  [TABLA 3 de 3] COMPARACIÓN DEFINITIVA — 4 MODELOS OPTIMIZADOS CON OPTUNA")
+print("  ESTA es la tabla principal para interpretar resultados finales.")
+print("  MAE / RMSE / MSE: menor es mejor  |  R²: mayor es mejor.")
+print("  Compara con [TABLA 1 de 3] para ver la ganancia de Optuna.")
+print("="*60)
 print(performance_df.round(4))
+with open('metricas_modelos_optimizados.txt', 'w', encoding='utf-8') as _f:
+    _f.write("[TABLA 3 de 3] COMPARACIÓN DEFINITIVA — 4 MODELOS OPTIMIZADOS CON OPTUNA\n")
+    _f.write("ESTA es la tabla principal para interpretar resultados finales.\n")
+    _f.write("MAE / RMSE / MSE: menor es mejor  |  R²: mayor es mejor.\n")
+    _f.write("Compara con metricas_modelos_base.txt para ver la ganancia de Optuna.\n")
+    _f.write("="*60 + "\n")
+    _f.write(performance_df.round(4).to_string(index=False))
+    _f.write("\n")
+print("  >> Guardado en: metricas_modelos_optimizados.txt")
 
 styled_performance_df = performance_df.style \
-    .apply(highlight_min, subset=['MAE', 'RMSE', 'MAPE']) \
+    .apply(highlight_min, subset=['MAE', 'RMSE', 'MSE']) \
     .apply(highlight_max, subset=['R-squared'])
 
-print("\nComparación del rendimiento del modelo (con resaltados para el mejor rendimiento):\n")
+print("\n(con resaltados de mejor por métrica):")
 print(styled_performance_df)
 
 # --- Comparación Visual de Métricas ---
@@ -1691,10 +1538,10 @@ for p in axes[2].patches:
     axes[2].annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
                 ha='left', va='center', fontsize=8, weight='bold')
 
-# MAPE (menor es mejor)
-sns.barplot(ax=axes[3], x='MAPE', y='Model', data=performance_df.sort_values(by='MAPE', ascending=True), palette='Reds_r')
-axes[3].set_title('MAPE (Menor es Mejor)')
-axes[3].set_xlabel('MAPE (%)')
+# MSE (menor es mejor)
+sns.barplot(ax=axes[3], x='MSE', y='Model', data=performance_df.sort_values(by='MSE', ascending=True), palette='Reds_r')
+axes[3].set_title('MSE (Menor es Mejor)')
+axes[3].set_xlabel('MSE')
 axes[3].set_ylabel('')
 axes[3].grid(axis='x', linestyle='--', alpha=0.7)
 for p in axes[3].patches:
@@ -1719,14 +1566,17 @@ plt.close('all')
 shap.plots.beeswarm(shap_exp_cat, max_display=20, show=False)
 _shap_fig = plt.gcf()
 _shap_fig.set_size_inches(12, 8)
-_shap_fig.suptitle('Importancia de Características SHAP de CatBoost (Beeswarm)', y=1.01, fontsize=13)
+_shap_fig.suptitle('Impacto y Dirección de las Variables — CatBoost', y=1.01, fontsize=13)
 _dbg_nc = sum(len(ax.collections) for ax in _shap_fig.axes)
 print(f"  [DEBUG] Figura CatBoost — ejes: {len(_shap_fig.axes)}, colecciones: {_dbg_nc} ({'TIENE DATOS' if _dbg_nc > 0 else 'SIN PUNTOS VISIBLES'})")
 _fpath = os.path.abspath('shap_catboost.png')
 _shap_fig.savefig(_fpath, dpi=150, bbox_inches='tight')
 print(f"  [DEBUG] Guardado: {_fpath} ({os.path.getsize(_fpath):,} bytes)")
 plt.close('all')
-os.startfile(_fpath)
+try:
+    os.startfile(_fpath)
+except AttributeError:
+    pass  # os.startfile solo existe en Windows
 
 # --- Valores SHAP de XGBoost ---
 print("\nCalculando SHAP para XGBoost...")
@@ -1741,14 +1591,17 @@ plt.close('all')
 shap.plots.beeswarm(shap_exp_xgb, max_display=20, show=False)
 _shap_fig = plt.gcf()
 _shap_fig.set_size_inches(12, 8)
-_shap_fig.suptitle('Importancia de Características SHAP de XGBoost (Beeswarm)', y=1.01, fontsize=13)
+_shap_fig.suptitle('Impacto y Dirección de las Variables — XGBoost', y=1.01, fontsize=13)
 _dbg_nc = sum(len(ax.collections) for ax in _shap_fig.axes)
 print(f"  [DEBUG] Figura XGBoost — ejes: {len(_shap_fig.axes)}, colecciones: {_dbg_nc} ({'TIENE DATOS' if _dbg_nc > 0 else 'SIN PUNTOS VISIBLES'})")
 _fpath = os.path.abspath('shap_xgboost.png')
 _shap_fig.savefig(_fpath, dpi=150, bbox_inches='tight')
 print(f"  [DEBUG] Guardado: {_fpath} ({os.path.getsize(_fpath):,} bytes)")
 plt.close('all')
-os.startfile(_fpath)
+try:
+    os.startfile(_fpath)
+except AttributeError:
+    pass  # os.startfile solo existe en Windows
 
 # --- Valores SHAP de LightGBM ---
 print("\nCalculando SHAP para LightGBM...")
@@ -1763,14 +1616,17 @@ plt.close('all')
 shap.plots.beeswarm(shap_exp_lgbm, max_display=20, show=False)
 _shap_fig = plt.gcf()
 _shap_fig.set_size_inches(12, 8)
-_shap_fig.suptitle('Importancia de Características SHAP de LightGBM (Beeswarm)', y=1.01, fontsize=13)
+_shap_fig.suptitle('Impacto y Dirección de las Variables — LightGBM', y=1.01, fontsize=13)
 _dbg_nc = sum(len(ax.collections) for ax in _shap_fig.axes)
 print(f"  [DEBUG] Figura LightGBM — ejes: {len(_shap_fig.axes)}, colecciones: {_dbg_nc} ({'TIENE DATOS' if _dbg_nc > 0 else 'SIN PUNTOS VISIBLES'})")
 _fpath = os.path.abspath('shap_lgbm.png')
 _shap_fig.savefig(_fpath, dpi=150, bbox_inches='tight')
 print(f"  [DEBUG] Guardado: {_fpath} ({os.path.getsize(_fpath):,} bytes)")
 plt.close('all')
-os.startfile(_fpath)
+try:
+    os.startfile(_fpath)
+except AttributeError:
+    pass  # os.startfile solo existe en Windows
 
 # --- Valores SHAP de Random Forest ---
 # Se subsamplea X_test_rf_final a 500 filas para acelerar el cálculo SHAP.
@@ -1790,14 +1646,17 @@ plt.close('all')
 shap.plots.beeswarm(shap_exp_rf, max_display=20, show=False)
 _shap_fig = plt.gcf()
 _shap_fig.set_size_inches(12, 8)
-_shap_fig.suptitle('Importancia de Características SHAP de Random Forest (Beeswarm)', y=1.01, fontsize=13)
+_shap_fig.suptitle('Impacto y Dirección de las Variables — Random Forest', y=1.01, fontsize=13)
 _dbg_nc = sum(len(ax.collections) for ax in _shap_fig.axes)
 print(f"  [DEBUG] Figura RF — ejes: {len(_shap_fig.axes)}, colecciones: {_dbg_nc} ({'TIENE DATOS' if _dbg_nc > 0 else 'SIN PUNTOS VISIBLES'})")
 _fpath = os.path.abspath('shap_rf.png')
 _shap_fig.savefig(_fpath, dpi=150, bbox_inches='tight')
 print(f"  [DEBUG] Guardado: {_fpath} ({os.path.getsize(_fpath):,} bytes)")
 plt.close('all')
-os.startfile(_fpath)
+try:
+    os.startfile(_fpath)
+except AttributeError:
+    pass  # os.startfile solo existe en Windows
 
 """### FASE 15: ANÁLISIS DE VALIDACIÓN CRUZADA
 
@@ -1805,17 +1664,6 @@ os.startfile(_fpath)
 
 Para evaluar la estabilidad y robustez de los modelos, se realizará una validación cruzada temporal utilizando `TimeSeriesSplit` con 5 divisiones (splits). Esto simula el progreso del tiempo, entrenando en datos pasados y validando en datos futuros.
 """
-
-# Helper function to calculate MAPE robustly
-def calculate_mape_robust(y_true, y_pred):
-    y_true_non_zero = y_true[y_true != 0]
-    y_pred_non_zero = y_pred[y_true != 0]
-    if len(y_true_non_zero) == 0:
-        return np.nan # Avoids division by zero if all true values are zero
-    mape = np.mean(np.abs((y_true_non_zero - y_pred_non_zero) / y_true_non_zero)) * 100
-    # Handle cases where MAPE might be extremely large due to very small true values
-    return np.clip(mape, 0, 1e5) # Cap MAPE at a reasonable maximum to avoid infinite/huge values
-
 
 print("Configuring TimeSeriesSplit...")
 n_splits = 5
@@ -1834,10 +1682,10 @@ print(f"Combined data shape for CV: {X_train_val_combined.shape}")
 
 # Lists to store CV results
 cv_results = {
-    'CatBoost': {'RMSE': [], 'MAE': [], 'R2': [], 'MAPE': []},
-    'XGBoost': {'RMSE': [], 'MAE': [], 'R2': [], 'MAPE': []},
-    'LightGBM': {'RMSE': [], 'MAE': [], 'R2': [], 'MAPE': []},
-    'RandomForest': {'RMSE': [], 'MAE': [], 'R2': [], 'MAPE': []}
+    'CatBoost': {'RMSE': [], 'MAE': [], 'R2': [], 'MSE': []},
+    'XGBoost': {'RMSE': [], 'MAE': [], 'R2': [], 'MSE': []},
+    'LightGBM': {'RMSE': [], 'MAE': [], 'R2': [], 'MSE': []},
+    'RandomForest': {'RMSE': [], 'MAE': [], 'R2': [], 'MSE': []}
 }
 
 """#### Cross-Validation para CatBoost Regressor"""
@@ -1861,15 +1709,14 @@ for fold, (train_index, test_index) in enumerate(tscv.split(X_train_val_combined
         early_stopping_rounds=50,
         cat_features=cat_features_for_catboost
     )
-    cat_model_cv.fit(X_cv_train, y_cv_train, eval_set=(X_cv_test, y_cv_test), early_stopping_rounds=50, verbose=0)
+    cat_model_cv.fit(X_cv_train, y_cv_train, eval_set=(X_cv_test, y_cv_test), verbose=0)
 
-    y_pred_cv = cat_model_cv.predict(X_cv_test)
-    y_pred_cv = np.maximum(0, y_pred_cv) # Ensure non-negative predictions
+    y_pred_cv = np.maximum(0, cat_model_cv.predict(X_cv_test))
 
     cv_results['CatBoost']['RMSE'].append(np.sqrt(mean_squared_error(y_cv_test, y_pred_cv)))
     cv_results['CatBoost']['MAE'].append(mean_absolute_error(y_cv_test, y_pred_cv))
     cv_results['CatBoost']['R2'].append(r2_score(y_cv_test, y_pred_cv))
-    cv_results['CatBoost']['MAPE'].append(calculate_mape_robust(y_cv_test, y_pred_cv))
+    cv_results['CatBoost']['MSE'].append(mean_squared_error(y_cv_test, y_pred_cv))
 print("CatBoost CV complete.")
 
 """#### Cross-Validation para XGBoost Regressor"""
@@ -1914,7 +1761,7 @@ for fold, (train_index, test_index) in enumerate(tscv.split(X_train_val_combined
     cv_results['XGBoost']['RMSE'].append(np.sqrt(mean_squared_error(y_cv_test, y_pred_cv)))
     cv_results['XGBoost']['MAE'].append(mean_absolute_error(y_cv_test, y_pred_cv))
     cv_results['XGBoost']['R2'].append(r2_score(y_cv_test, y_pred_cv))
-    cv_results['XGBoost']['MAPE'].append(calculate_mape_robust(y_cv_test, y_pred_cv))
+    cv_results['XGBoost']['MSE'].append(mean_squared_error(y_cv_test, y_pred_cv))
 print("XGBoost CV complete.")
 
 """#### Cross-Validation para LightGBM Regressor"""
@@ -1928,7 +1775,7 @@ for fold, (train_index, test_index) in enumerate(tscv.split(X_train_val_combined
     y_cv_train, y_cv_test = y_train_val_combined.iloc[train_index], y_train_val_combined.iloc[test_index]
 
     best_lgbm_params_cv = study_lgbm.best_params.copy()
-    best_lgbm_params_cv['objective'] = 'regression_l1'
+    best_lgbm_params_cv['objective'] = 'poisson'
     best_lgbm_params_cv['metric'] = 'rmse'
     best_lgbm_params_cv['random_state'] = 42
     best_lgbm_params_cv['n_jobs'] = -1
@@ -1946,7 +1793,7 @@ for fold, (train_index, test_index) in enumerate(tscv.split(X_train_val_combined
     cv_results['LightGBM']['RMSE'].append(np.sqrt(mean_squared_error(y_cv_test, y_pred_cv)))
     cv_results['LightGBM']['MAE'].append(mean_absolute_error(y_cv_test, y_pred_cv))
     cv_results['LightGBM']['R2'].append(r2_score(y_cv_test, y_pred_cv))
-    cv_results['LightGBM']['MAPE'].append(calculate_mape_robust(y_cv_test, y_pred_cv))
+    cv_results['LightGBM']['MSE'].append(mean_squared_error(y_cv_test, y_pred_cv))
 print("LightGBM CV complete.")
 
 """#### Cross-Validation para Random Forest Regressor"""
@@ -1981,7 +1828,7 @@ for fold, (train_index, test_index) in enumerate(tscv.split(X_train_val_combined
     cv_results['RandomForest']['RMSE'].append(np.sqrt(mean_squared_error(y_cv_test, y_pred_cv)))
     cv_results['RandomForest']['MAE'].append(mean_absolute_error(y_cv_test, y_pred_cv))
     cv_results['RandomForest']['R2'].append(r2_score(y_cv_test, y_pred_cv))
-    cv_results['RandomForest']['MAPE'].append(calculate_mape_robust(y_cv_test, y_pred_cv))
+    cv_results['RandomForest']['MSE'].append(mean_squared_error(y_cv_test, y_pred_cv))
 print("Random Forest CV complete.")
 
 """#### Visualización de los Resultados de la Validación Cruzada"""
@@ -2000,18 +1847,18 @@ df_plot_cv = pd.DataFrame(plot_data)
 fig, axes = plt.subplots(1, 4, figsize=(24, 7), sharey=False)
 fig.suptitle('Resultados de la Validación Cruzada Temporal (5 Folds)', fontsize=16, weight='bold', y=1.02)
 
-metrics_to_plot = ['RMSE', 'MAE', 'R2', 'MAPE']
+metrics_to_plot = ['RMSE', 'MAE', 'R2', 'MSE']
 titles = {
     'RMSE': 'RMSE (Menor es Mejor)',
     'MAE': 'MAE (Menor es Mejor)',
     'R2': 'R² (Mayor es Mejor)',
-    'MAPE': 'MAPE (%) (Menor es Mejor)'
+    'MSE': 'MSE (Menor es Mejor)'
 }
 palettes = {
     'RMSE': 'Oranges_r',
     'MAE': 'Greens_r',
     'R2': 'Blues_r',
-    'MAPE': 'Reds_r'
+    'MSE': 'Reds_r'
 }
 
 for i, metric in enumerate(metrics_to_plot):
@@ -2019,7 +1866,7 @@ for i, metric in enumerate(metrics_to_plot):
     sns.boxplot(ax=axes[i], x='Model', y='Value', data=subset_data, palette=palettes[metric])
     axes[i].set_title(titles[metric])
     axes[i].set_xlabel('')
-    axes[i].set_ylabel(metric if metric != 'MAPE' else 'MAPE (%)')
+    axes[i].set_ylabel(metric)
     axes[i].tick_params(axis='x', rotation=45)
     axes[i].grid(axis='y', linestyle='--', alpha=0.7)
 
@@ -2028,136 +1875,288 @@ plt.show()
 
 print("CV analysis complete.")
 
-# Importancia de características de CatBoost
-# Obtener la importancia de características para CatBoost, ya maneja nombres categóricos nativos.
-cat_feature_importance = pd.DataFrame({
-    'Feature': X_train.columns,
-    'Importance': cat_model.get_feature_importance()
-}).sort_values(by='Importance', ascending=False)
 
-print("\nImportancia de características de CatBoost (Top 10):")
-print(cat_feature_importance.head(10))
-
-plt.figure(figsize=(12, 7))
-sns.barplot(x='Importance', y='Feature', data=cat_feature_importance.head(10), palette='viridis')
-plt.title('Importancia de características de CatBoost (Top 10)')
-plt.xlabel('Importancia')
-plt.ylabel('Característica')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=9, weight='bold')
-plt.show()
-
-
-# Importancia de características de XGBoost
-# Los nombres de las características para XGBoost provienen de X_train_xgb (codificado one-hot)
-xgb_importances_dict = trained_xgb_model.get_score(importance_type='gain')
-
-# Crear un DataFrame para la importancia de características, asegurando que se incluyan todas las características de X_train_xgb
-xgb_feature_importance = pd.DataFrame({
-    'Feature': X_train_xgb.columns,
-    'Importance': X_train_xgb.columns.map(xgb_importances_dict).fillna(0) # Mapear puntuaciones y rellenar NaN con 0
-}).sort_values(by='Importance', ascending=False)
-
-print("\nImportancia de características de XGBoost (Top 10):")
-print(xgb_feature_importance.head(10))
-
-plt.figure(figsize=(12, 7))
-sns.barplot(x='Importance', y='Feature', data=xgb_feature_importance.head(10), palette='viridis')
-plt.title('Importancia de características de XGBoost (Top 10)')
-plt.xlabel('Importancia (Ganancia)')
-plt.ylabel('Característica')
-for p in plt.gca().patches:
-    plt.gca().annotate(f'{p.get_width():.2f}', (p.get_width(), p.get_y() + p.get_height() / 2.),
-                ha='left', va='center', fontsize=9, weight='bold')
-plt.show()
-
-"""### 4.7 Evaluación de Resiliencia Operativa Predicha"""
+"""### MODELO FINAL — LightGBM Clasificador de Resiliencia Operativa"""
 
 print("\n" + "="*60)
-print("  4.7 EVALUACIÓN DE RESILIENCIA OPERATIVA PREDICHA")
+print("  MODELO FINAL: LightGBM CLASIFICADOR")
+print("  Target: Baja / Media / Alta (umbrales del train set)")
+print("  Elimina el sesgo de la media propio de la regresión MSE.")
 print("="*60)
 
-# RO real del conjunto de prueba
-y_test_ro = 1 / (1 + y_test.values)
+# --- Target de clasificación (anti-leakage: umbrales solo del train set) ---
+_ro_train = 1 / (1 + y_train.values)
+_p33_cls  = np.percentile(_ro_train, 33)
+_p66_cls  = np.percentile(_ro_train, 66)
 
-# RO predicha por cada modelo (clipping para evitar negativos)
-y_pred_cat_ro   = 1 / (1 + np.maximum(0, y_pred_cat))
-y_pred_xgb_ro   = 1 / (1 + np.maximum(0, y_pred_xgb))
-y_pred_lgbm_ro  = 1 / (1 + np.maximum(0, y_pred_lgbm))
-y_pred_rf_ro    = 1 / (1 + np.maximum(0, y_pred_rf))
+print(f"\n  Umbrales del train set:")
+print(f"    p33 = {_p33_cls:.4f}  →  RO ≤ p33 : Baja")
+print(f"    p66 = {_p66_cls:.4f}  →  p33 < RO ≤ p66 : Media  |  RO > p66 : Alta")
 
-# --- Métricas MAE y RMSE sobre RO ---
-ro_metrics = {
-    'Modelo': ['CatBoost', 'XGBoost', 'LightGBM', 'Random Forest'],
-    'MAE_RO':  [mean_absolute_error(y_test_ro, y_pred_cat_ro),
-                mean_absolute_error(y_test_ro, y_pred_xgb_ro),
-                mean_absolute_error(y_test_ro, y_pred_lgbm_ro),
-                mean_absolute_error(y_test_ro, y_pred_rf_ro)],
-    'RMSE_RO': [np.sqrt(mean_squared_error(y_test_ro, y_pred_cat_ro)),
-                np.sqrt(mean_squared_error(y_test_ro, y_pred_xgb_ro)),
-                np.sqrt(mean_squared_error(y_test_ro, y_pred_lgbm_ro)),
-                np.sqrt(mean_squared_error(y_test_ro, y_pred_rf_ro))],
-}
-df_ro_metrics = pd.DataFrame(ro_metrics)
-print("\n--- Métricas de error sobre Resiliencia Operativa (escala 0–1) ---")
-print(df_ro_metrics.round(6).to_string(index=False))
+def _cls_target(y_series):
+    ro = 1 / (1 + y_series.values)
+    return pd.Series(
+        np.where(ro <= _p33_cls, 'Baja', np.where(ro <= _p66_cls, 'Media', 'Alta')),
+        index=y_series.index
+    )
 
-# --- Categorización y Accuracy ---
-# Umbrales calculados sobre el conjunto de entrenamiento (sin data leakage)
-y_train_ro = 1 / (1 + y_train.values)
-p33_train = np.percentile(y_train_ro, 33)
-p66_train = np.percentile(y_train_ro, 66)
+y_train_cls = _cls_target(y_train)
+y_val_cls   = _cls_target(y_val)
+y_test_cls  = _cls_target(y_test)
 
-def categorize_ro(ro_array, p33, p66):
-    cats = np.where(ro_array <= p33, 'Baja',
-           np.where(ro_array <= p66, 'Media', 'Alta'))
-    return cats
+print(f"\n  Distribución en train set:")
+print(y_train_cls.value_counts().to_string())
 
-y_test_cat   = categorize_ro(y_test_ro,        p33_train, p66_train)
-y_cat_cat    = categorize_ro(y_pred_cat_ro,    p33_train, p66_train)
-y_xgb_cat    = categorize_ro(y_pred_xgb_ro,   p33_train, p66_train)
-y_lgbm_cat   = categorize_ro(y_pred_lgbm_ro,  p33_train, p66_train)
-y_rf_cat     = categorize_ro(y_pred_rf_ro,     p33_train, p66_train)
+# --- Optuna para LightGBM Clasificador ---
+cat_features_lgbm_clf = X_train.select_dtypes(include='category').columns.tolist()
 
-from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
+def objective_lgbm_clf(trial):
+    params = {
+        'objective': 'multiclass',
+        'num_class': 3,
+        'metric': 'multi_logloss',
+        'n_estimators': trial.suggest_int('n_estimators', 100, 2000),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'num_leaves': trial.suggest_int('num_leaves', 2, 256),
+        'max_depth': trial.suggest_int('max_depth', 3, 15),
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.4, 1.0),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.4, 1.0),
+        'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 10.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 10.0, log=True),
+        'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+        'random_state': 42,
+        'n_jobs': -1,
+        'verbose': -1,
+    }
+    model = lgb.LGBMClassifier(**params)
+    model.fit(X_train, y_train_cls,
+              eval_set=[(X_val, y_val_cls)],
+              callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+              categorical_feature=cat_features_lgbm_clf)
+    y_pred_val_cls = model.predict(X_val)
+    return 1 - accuracy_score(y_val_cls, y_pred_val_cls)
 
-print("\n--- Accuracy de Categoría (Baja / Media / Alta) ---")
-for nombre, y_pred_cat_arr in [('CatBoost', y_cat_cat), ('XGBoost', y_xgb_cat),
-                                ('LightGBM', y_lgbm_cat), ('Random Forest', y_rf_cat)]:
-    acc = accuracy_score(y_test_cat, y_pred_cat_arr)
-    print(f"  {nombre}: {acc:.4f} ({acc*100:.2f}%)")
+print("\nOptimizando LightGBM Clasificador con Optuna (50 trials)...")
+study_lgbm_clf = optuna.create_study(direction='minimize', study_name='LightGBM_Classifier')
+study_lgbm_clf.optimize(objective_lgbm_clf, n_trials=50, show_progress_bar=True)
+print(f"Mejor accuracy en validación: {(1 - study_lgbm_clf.best_trial.value)*100:.2f}%")
 
-# Matrices de confusión
-labels = ['Alta', 'Baja', 'Media']
-fig, axes = plt.subplots(1, 4, figsize=(22, 5))
-fig.suptitle('Matrices de Confusión — Categoría de Resiliencia Operativa', fontsize=14, weight='bold')
-for ax, (nombre, y_pred_cat_arr) in zip(axes, [('CatBoost', y_cat_cat), ('XGBoost', y_xgb_cat),
-                                                ('LightGBM', y_lgbm_cat), ('Random Forest', y_rf_cat)]):
-    cm = confusion_matrix(y_test_cat, y_pred_cat_arr, labels=labels)
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
-    disp.plot(ax=ax, colorbar=False, cmap='Blues')
-    ax.set_title(nombre)
+# --- Entrenamiento final en train + val ---
+best_clf_params = study_lgbm_clf.best_params.copy()
+best_clf_params.update({
+    'objective': 'multiclass', 'num_class': 3,
+    'metric': 'multi_logloss', 'random_state': 42,
+    'n_jobs': -1, 'verbose': -1,
+})
+
+X_train_val_clf = pd.concat([X_train, X_val])
+y_train_val_clf = pd.concat([y_train_cls, y_val_cls])
+
+lgbm_clf_model = lgb.LGBMClassifier(**best_clf_params)
+lgbm_clf_model.fit(X_train_val_clf, y_train_val_clf,
+                   categorical_feature=cat_features_lgbm_clf)
+
+# --- Evaluación en test set ---
+y_pred_cls = lgbm_clf_model.predict(X_test)
+
+acc_clf      = accuracy_score(y_test_cls, y_pred_cls)
+f1_macro     = f1_score(y_test_cls, y_pred_cls, average='macro')
+f1_weighted  = f1_score(y_test_cls, y_pred_cls, average='weighted')
+
+print("\n" + "="*60)
+print("  RESULTADOS — LightGBM CLASIFICADOR (test set)")
+print("="*60)
+print(f"  Accuracy    : {acc_clf:.4f} ({acc_clf*100:.2f}%)")
+print(f"  F1 Macro    : {f1_macro:.4f}")
+print(f"  F1 Weighted : {f1_weighted:.4f}")
+print("\n  Reporte de clasificación:")
+print(classification_report(y_test_cls, y_pred_cls, target_names=['Alta', 'Baja', 'Media']))
+
+# Matriz de confusión
+labels_cls = ['Alta', 'Baja', 'Media']
+fig, ax = plt.subplots(figsize=(6, 5))
+cm_cls = confusion_matrix(y_test_cls, y_pred_cls, labels=labels_cls)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm_cls, display_labels=labels_cls)
+disp.plot(ax=ax, colorbar=False, cmap='Blues')
+ax.set_title(f'LightGBM Clasificador — Resiliencia Operativa\n'
+             f'Accuracy: {acc_clf*100:.2f}%  |  F1 Macro: {f1_macro:.4f}',
+             fontsize=11)
 plt.tight_layout()
 plt.show()
 
-# Gráfico comparativo MAE y RMSE sobre RO
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-fig.suptitle('Error sobre Resiliencia Operativa Predicha', fontsize=13, weight='bold')
-sns.barplot(ax=axes[0], x='Modelo', y='MAE_RO',  data=df_ro_metrics, palette='Blues_r', edgecolor='black')
-axes[0].set_title('MAE sobre RO (menor es mejor)')
-axes[0].set_ylabel('MAE')
-axes[0].grid(axis='y', linestyle='--', alpha=0.5)
-for p in axes[0].patches:
-    axes[0].annotate(f'{p.get_height():.5f}', (p.get_x() + p.get_width()/2., p.get_height()),
-                ha='center', va='bottom', fontsize=9, weight='bold')
 
-sns.barplot(ax=axes[1], x='Modelo', y='RMSE_RO', data=df_ro_metrics, palette='Oranges', edgecolor='black')
-axes[1].set_title('RMSE sobre RO (menor es mejor)')
-axes[1].set_ylabel('RMSE')
-axes[1].grid(axis='y', linestyle='--', alpha=0.5)
-for p in axes[1].patches:
-    axes[1].annotate(f'{p.get_height():.5f}', (p.get_x() + p.get_width()/2., p.get_height()),
-                ha='center', va='bottom', fontsize=9, weight='bold')
+"""### PRONÓSTICO 3 MESES — LightGBM (Modelo Ganador)"""
+
+print("\n" + "="*60)
+print("  PRONÓSTICO 3 MESES — LightGBM (modelo ganador)")
+print("  Forecasting recursivo: cada mes predicho alimenta el siguiente")
+print("="*60)
+
+# Reconstruir fecha desde Year+Month
+df_hist_fc = df_sorted_fe.copy()
+df_hist_fc['_fecha'] = pd.to_datetime(
+    df_hist_fc['Year'].astype(str) + '-' + df_hist_fc['Month'].astype(str) + '-01'
+)
+# Empresa con más registros en el dataset
+empresa_fc = df_hist_fc['Empresa_operadora_grouped'].value_counts().index[0]
+
+# Último mes con datos de ESA empresa (puede ser anterior al fin del dataset global)
+last_date = df_hist_fc[
+    df_hist_fc['Empresa_operadora_grouped'] == empresa_fc
+]['_fecha'].max()
+
+print(f"  Empresa seleccionada para el pronóstico: {empresa_fc}")
+print(f"  Último mes con datos de {empresa_fc}: {last_date.strftime('%Y-%m')}")
+print(f"  Pronóstico: {(last_date + pd.DateOffset(months=1)).strftime('%Y-%m')} → "
+      f"{(last_date + pd.DateOffset(months=3)).strftime('%Y-%m')}")
+
+feature_cols = X_train.columns.tolist()
+
+# Categoría real mensual del test set — solo empresa seleccionada
+df_test_cls_plot = df_sorted_fe.iloc[val_split_point:].copy()
+df_test_cls_plot = df_test_cls_plot[
+    df_test_cls_plot['Empresa_operadora_grouped'] == empresa_fc
+].copy()
+df_test_cls_plot['_fecha'] = pd.to_datetime(
+    df_test_cls_plot['Year'].astype(str) + '-' + df_test_cls_plot['Month'].astype(str) + '-01'
+)
+_ro_test_emp = 1 / (1 + df_test_cls_plot['Num_Reclamos_por_averia_Aggregated'].values)
+df_test_cls_plot['categoria'] = np.where(_ro_test_emp <= _p33_cls, 'Baja',
+                                np.where(_ro_test_emp <= _p66_cls, 'Media', 'Alta'))
+
+# Distribución porcentual de categorías por mes (test set)
+cls_real_mensual = (df_test_cls_plot
+    .groupby(['_fecha', 'categoria'])
+    .size()
+    .unstack(fill_value=0))
+cls_real_mensual = cls_real_mensual.div(cls_real_mensual.sum(axis=1), axis=0) * 100
+
+# Forecasting con clasificador directo: T+1 → T+2 → T+3
+forecast_records = []
+
+for i in range(1, 4):
+    future_date     = last_date + pd.DateOffset(months=i)
+    future_year     = future_date.year
+    future_month    = future_date.month
+    future_quarter  = (future_month - 1) // 3 + 1
+    future_semester = (future_month - 1) // 6 + 1
+
+    grupos = df_hist_fc[
+        df_hist_fc['Empresa_operadora_grouped'] == empresa_fc
+    ][grouping_keys].drop_duplicates()
+    rows = []
+
+    for _, grp in grupos.iterrows():
+        mask = np.ones(len(df_hist_fc), dtype=bool)
+        for k in grouping_keys:
+            mask &= (df_hist_fc[k] == grp[k]).values
+        vals = df_hist_fc[mask].sort_values('_fecha')['Num_Reclamos_por_averia_Aggregated'].values
+
+        def get_lag(n):
+            return float(vals[-n]) if len(vals) >= n else -1.0
+
+        def get_rolling_mean(w):
+            v = vals[-w:] if len(vals) >= w else vals
+            return float(v.mean()) if len(v) > 0 else -1.0
+
+        def get_rolling_std(w):
+            v = vals[-w:] if len(vals) >= w else vals
+            return float(v.std()) if len(v) > 1 else -1.0
+
+        row = {k: grp[k] for k in grouping_keys}
+        row.update({
+            'Year': future_year, 'Month': future_month,
+            'Quarter': future_quarter, 'Semester': future_semester,
+            'lag_1':  get_lag(1),  'lag_3':  get_lag(3),
+            'lag_6':  get_lag(6),  'lag_12': get_lag(12),
+            'rolling_mean_3':  get_rolling_mean(3),
+            'rolling_mean_6':  get_rolling_mean(6),
+            'rolling_mean_12': get_rolling_mean(12),
+            'rolling_std_3':   get_rolling_std(3),
+            'rolling_std_6':   get_rolling_std(6),
+            'rolling_std_12':  get_rolling_std(12),
+        })
+        rows.append(row)
+
+    df_future = pd.DataFrame(rows)
+
+    for col in categorical_cols_native:
+        if col in df_future.columns and col in X_train.columns:
+            df_future[col] = pd.Categorical(df_future[col],
+                                            categories=X_train[col].cat.categories)
+
+    # Clasificador predice categoría directamente
+    cats_pred = lgbm_clf_model.predict(df_future[feature_cols])
+    dist = pd.Series(cats_pred).value_counts(normalize=True) * 100
+    mayoria = pd.Series(cats_pred).mode()[0]
+    print(f"  {future_date.strftime('%Y-%m')}: "
+          f"Alta={dist.get('Alta',0):.1f}%  Media={dist.get('Media',0):.1f}%  "
+          f"Baja={dist.get('Baja',0):.1f}%  → Predominante: {mayoria}")
+
+    forecast_records.append({
+        '_fecha': future_date.replace(day=1),
+        'Alta':  dist.get('Alta', 0),
+        'Media': dist.get('Media', 0),
+        'Baja':  dist.get('Baja', 0),
+        'mayoria': mayoria
+    })
+
+    # Actualizar historial con predicciones de reclamos del regresor base (para lag features)
+    y_future_reg = np.maximum(0, lgbm_model.predict(df_future[feature_cols]))
+    df_future['Num_Reclamos_por_averia_Aggregated'] = y_future_reg
+    df_future['_fecha'] = future_date.replace(day=1)
+    cols_comunes = [c for c in df_hist_fc.columns if c in df_future.columns]
+    df_hist_fc = pd.concat([df_hist_fc, df_future[cols_comunes]], ignore_index=True)
+
+df_forecast = pd.DataFrame(forecast_records).set_index('_fecha')
+
+# --- Gráfico: distribución real (test) + pronóstico categórico 3 meses ---
+colores = {'Alta': '#2ecc71', 'Media': '#f39c12', 'Baja': '#e74c3c'}
+cats_order = ['Alta', 'Media', 'Baja']
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 5),
+                         gridspec_kw={'width_ratios': [3, 1]})
+fig.suptitle(f'Resiliencia Operativa — {empresa_fc}\nLightGBM Clasificador',
+             fontsize=13, weight='bold')
+
+# Panel izquierdo: distribución real en test set
+for cat in cats_order:
+    if cat in cls_real_mensual.columns:
+        axes[0].fill_between(cls_real_mensual.index, 0,
+                             cls_real_mensual[cat].cumsum(axis=0) if cat == cats_order[0]
+                             else cls_real_mensual[cats_order[:cats_order.index(cat)]].sum(axis=1) +
+                                  cls_real_mensual[cat],
+                             alpha=0.0)
+
+bottom_real = np.zeros(len(cls_real_mensual))
+for cat in cats_order:
+    if cat in cls_real_mensual.columns:
+        axes[0].bar(cls_real_mensual.index, cls_real_mensual[cat],
+                    bottom=bottom_real, color=colores[cat], label=cat, width=20)
+        bottom_real += cls_real_mensual[cat].values
+axes[0].set_title('Distribución real (test set)', fontsize=11)
+axes[0].set_ylabel('% de grupos')
+axes[0].set_ylim(0, 100)
+axes[0].legend(loc='upper left')
+axes[0].grid(axis='y', linestyle='--', alpha=0.4)
+
+# Panel derecho: pronóstico 3 meses
+bottom_fc = np.zeros(len(df_forecast))
+for cat in cats_order:
+    axes[1].bar(range(len(df_forecast)), df_forecast[cat],
+                bottom=bottom_fc, color=colores[cat], label=cat)
+    for j, val in enumerate(df_forecast[cat]):
+        if val > 5:
+            axes[1].text(j, bottom_fc[j] + val / 2, f'{val:.0f}%',
+                         ha='center', va='center', fontsize=8, weight='bold', color='white')
+    bottom_fc += df_forecast[cat].values
+axes[1].set_xticks(range(len(df_forecast)))
+axes[1].set_xticklabels([d.strftime('%Y-%m') for d in df_forecast.index], rotation=15)
+axes[1].set_title('Pronóstico 3 meses', fontsize=11)
+axes[1].set_ylabel('% de grupos')
+axes[1].set_ylim(0, 100)
+axes[1].grid(axis='y', linestyle='--', alpha=0.4)
+
 plt.tight_layout()
 plt.show()
